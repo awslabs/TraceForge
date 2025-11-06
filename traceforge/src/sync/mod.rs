@@ -13,4 +13,6 @@ pub use rwlock::{
 
 pub mod oneshot;
 
+pub mod notify;
+pub use notify::{Notified, Notify};
 //pub mod watch;

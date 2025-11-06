@@ -1,5 +1,7 @@
 //! TraceForge's implementation of [`tokio::sync::mpsc`].
-use crate::*;
+use std::task::{Context, Poll};
+
+use crate::{sync::mpsc::error::TrySendError, *};
 
 // The current version ignores the buffer size
 pub fn channel<T>(_buffer: usize) -> (Sender<T>, Receiver<T>)
@@ -27,6 +29,14 @@ impl<T: Message + 'static> Sender<T> {
     pub async fn send(&self, v: T) -> Result<(), error::SendError<T>> {
         self.sender.send_msg(v);
         Ok(())
+    }
+    pub fn try_send(&self, v: T) -> Result<(), TrySendError<T>> {
+        if nondet() {
+            self.sender.send_msg(v);
+            Ok(())
+        } else {
+            Err(TrySendError::Full(v))
+        }
     }
 }
 
@@ -56,6 +66,10 @@ impl<T: Message + Clone + 'static> Receiver<T> {
     pub fn try_recv(&self) -> Result<T, error::TryRecvError> {
         info!("This is an incomplete implementation. It never returns errors");
         Ok(self.receiver.recv_msg_block())
+    }
+
+    pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
+        return Poll::Ready(self.recv());
     }
 }
 

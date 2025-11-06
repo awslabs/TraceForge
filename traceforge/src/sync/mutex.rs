@@ -68,6 +68,7 @@ impl Synchronizer {
             }
             // now the mutex is locked. Only read TRYLOCK_TAG or UNLOCK_TAG messages.
 
+            loop {
             let req: LockRequest =
                 recv_tagged_msg_block(|_, tag| tag == Some(TRYLOCK_TAG) || tag == Some(UNLOCK_TAG));
             match req {
@@ -86,6 +87,7 @@ impl Synchronizer {
                     if let Some(t) = self.holder {
                         if t == tid {
                             self.holder = None;
+                            break; // break out of loop
                         } else {
                             panic!("Unlocking by different thread id");
                         }
@@ -93,6 +95,7 @@ impl Synchronizer {
                         panic!("Unlocking a lock that is not held");
                     }
                 }
+            }
             }
         }
     }
