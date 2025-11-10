@@ -51,7 +51,7 @@ enum ReplicaMsg {
     Terminate,
 }
 
-fn replica(pid: ThreadId, sid: ThreadId) {
+fn _replica(pid: ThreadId, sid: ThreadId) {
     let mut state = Replica {
         primary: pid,
         secondary: sid,
@@ -98,7 +98,7 @@ fn primary_node() -> () {
     let mut acked: HashMap<u32, u32> = HashMap::new();
     let mut txid: u32 = 0;
 
-    let (_pid, sid, sbyid) = initialize(Role::Primary);
+    let (_pid, sid, _sbyid) = initialize(Role::Primary);
 
     loop {
         let m = recv_msg_block();
@@ -155,7 +155,7 @@ fn secondary_node() -> () {
     let mut buffer: HashMap<u32, u32> = HashMap::new();
     let mut txid = 0;
 
-    let (pid, _sid, sbyid) = initialize(Role::Backup);
+    let (pid, _sid, _sbyid) = initialize(Role::Backup);
     loop {
         let m = recv_msg_block();
         match m {

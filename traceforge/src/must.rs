@@ -718,7 +718,9 @@ impl Must {
                     send.can_be_monitor_read(&blab.pos()) ||
                     // . Plain read from the send:
                     // . . It is unread and the location *really* matches (not via monitoring)
-                        send.can_be_read_from(loc)
+                        (send.can_be_read_from(loc) &&
+                            // disregard cancelled sends
+                            !send.is_cancelled_wrt(&blab.as_event_label()))
                 })
             } else {
                 false

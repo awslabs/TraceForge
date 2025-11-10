@@ -8,7 +8,7 @@ use traceforge::monitor_types::EndCondition;
 use traceforge::msg::Message;
 use traceforge::thread::{main_thread_id, ThreadId};
 use traceforge::{cover, future, nondet, recv_msg_block, send_msg, thread, Config, SchedulePolicy};
-use futures::future::{join_all, pending, select, Either};
+use futures::future::{join_all, pending, select, select_all, Either};
 use futures::prelude::*;
 use futures::stream::FuturesUnordered;
 
@@ -836,38 +836,63 @@ fn nested_cancel() {
     assert_eq!((stats.execs, stats.block), (1, 0));
 }
 
+// https://oeis.org/A268586, shifted by two
+fn weird_seq(n: u32) -> u32 {
+    let t = n * (n + 7);
+    if n >= 3 {
+        t*(2 as u32).pow(n-3)
+    } else {
+        t/(2 as u32).pow(3-n)
+    }
+}
+
 #[test]
-fn cancel_recv() {
-    for _ in 0..1000 {
-        let stats = traceforge::verify(
-            Config::builder()
-                .with_policy(SchedulePolicy::Arbitrary)
-                .build(),
-            || {
-                future::block_on(async {
-                    let (sender1, receiver1) = traceforge::channel::Builder::new().build();
-                    let (sender2, receiver2) = traceforge::channel::Builder::new().build();
-                    thread::spawn(move || {
-                        sender1.send_msg(1);
-                        sender2.send_msg(2);
-                    });
-                    let unwrap_either = |e| match e {
-                        Either::Left((v, _)) => v,
-                        Either::Right((v, _)) => v,
-                    };
+fn select_collect_n() {
+    // Repetitions with arbitrary scheduling
+    let reps = 5;
+    for n in 1..5 {
+        let corrects : Vec<_> = (1..=n as u32).rev().map(weird_seq).collect();
+        for iter in 1..n {
+            if n == 5 && iter > 2 { break; } // Too long
+            let correct : u32 = corrects.iter().take(iter).product();
+            for _ in 0..reps {
+                let stats = traceforge::verify(
+                    Config::builder()
+                        .with_policy(SchedulePolicy::Arbitrary)
+                        .build(),
+                    move || {
+                        future::block_on(async {
+                            let mut sends = Vec::new();
+                            let mut recvs = Vec::new();
+                            for _ in 0..n {
+                                let (s, r) = traceforge::channel::Builder::new().build();
+                                sends.push(s);
+                                recvs.push(r);
+                            }
+                            thread::spawn(move || {
+                                for i in 0..n { sends[i].send_msg(i); }
+                            });
 
-                    let a = select(receiver1.async_recv_msg(), receiver2.async_recv_msg()).await;
-                    let a = unwrap_either(a);
+                            let mut res: usize = 0;
+                            for _ in 0 .. iter {
+                                let (ret, _, _) = select_all(
+                                        recvs.iter().map(|r|r.async_recv_msg())
+                                    ).await;
+                                res += ret;
+                            }
 
-                    let b = select(receiver1.async_recv_msg(), receiver2.async_recv_msg()).await;
-                    let b = unwrap_either(b);
-                    assert_eq!(a + b, 3);
-                });
-            },
-        );
-        assert_eq!(stats.execs, 26);
-        // No blocking execution: the futures are properly cancelled
-        assert_eq!(stats.block, 0);
+                            // Everything was collected
+                            if iter == n {
+                                assert_eq!(res, n*(n-1)/2);
+                            }
+                        });
+                    },
+                );
+                assert_eq!(stats.execs, correct as usize);
+                assert_eq!(stats.block, 0);
+                println!("{} executions with {} blocked", stats.execs, stats.block);
+            }
+        }
     }
 }
 

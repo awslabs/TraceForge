@@ -8,6 +8,7 @@
 //! [`futures::executor`]: https://docs.rs/futures/0.3.30/futures/executor/index.html
 
 use crate::channel::{from_receiver, Builder, Receiver, Sender};
+use crate::loc::WakeMsg;
 use crate::msg::Message;
 use crate::runtime::execution::ExecutionState;
 use crate::runtime::task::TaskId;
@@ -27,9 +28,9 @@ use std::task::{Context, Poll, Waker};
 // unsafe impl Sync for Sender<()> {}
 
 // The value is irrelevant, we're using a Channel<()> as a waker.
-impl std::task::Wake for Sender<()> {
+impl std::task::Wake for Sender<WakeMsg> {
     fn wake(self: std::sync::Arc<Self>) {
-        self.send_msg(());
+        self.send_msg(WakeMsg);
     }
 }
 
@@ -71,7 +72,7 @@ where
 
     let task_id = ExecutionState::spawn_thread(
         move || {
-            let (sender, fut_recv) = Builder::<()>::new().build();
+            let (sender, fut_recv) = Builder::<WakeMsg>::new().build();
             let fut_waker = Waker::from(std::sync::Arc::new(sender.clone()));
 
             // Poll once in advance:
@@ -111,7 +112,7 @@ where
                 } else {
                     // Futured informed us to poll again
                     assert!(ind == 1);
-                    assert!(msg.as_any().downcast::<()>().is_ok());
+                    assert!(msg.as_any().downcast::<WakeMsg>().is_ok());
                     res = fut.as_mut().poll(&mut Context::from_waker(&fut_waker));
                 }
             };
@@ -466,7 +467,7 @@ impl<T: Message + 'static> Future for JoinHandle<T> {
 /// Run a future to completion on the current thread.
 pub fn block_on<F: Future>(future: F) -> F::Output {
     let mut future = Box::pin(future);
-    let (sender, receiver) = Builder::<()>::new().build();
+    let (sender, receiver) = Builder::<WakeMsg>::new().build();
     let waker = Waker::from(std::sync::Arc::new(sender.clone()));
     let cx = &mut Context::from_waker(&waker);
 

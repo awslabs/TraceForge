@@ -6,7 +6,7 @@ use std::fmt;
 use std::ops::RangeInclusive;
 
 use crate::event::Event;
-use crate::loc::{CommunicationModel, Loc, RecvLoc, SendLoc};
+use crate::loc::{CommunicationModel, Loc, RecvLoc, SendLoc, WakeMsg};
 use crate::msg::Val;
 use crate::thread::main_thread_id;
 use crate::vector_clock::VectorClock;
@@ -894,6 +894,10 @@ impl SendMsg {
         self.reader().is_none()
     }
 
+    pub(crate) fn is_cancelled_wrt(&self, other: &EventLabel) -> bool {
+        // cached_porf to disregard own rf (porf;po prefix)
+        self.val.as_any().downcast::<WakeMsg>().is_ok() && other.cached_porf().contains(self.pos())
+    }
     pub(crate) fn can_be_read_from(&self, reader_loc: &RecvLoc) -> bool {
         self.is_unread() && reader_loc.matches(self)
     }

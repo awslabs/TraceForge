@@ -125,12 +125,12 @@ fn ns_r_sel_mk() {
     enum Msg {
         Val(thread::ThreadId, u32),
 
-        TID(thread::ThreadId),
+        _TID(thread::ThreadId),
     }
 
     let n: u32 = 8;
 
-    let mode = ConsType::WB;
+    let mode = ConsType::FIFO;
 
     let now = Instant::now();
 
@@ -211,12 +211,12 @@ fn ns_rn_mk() {
     enum Msg {
         Val(thread::ThreadId, u32),
 
-        TID(thread::ThreadId),
+        _TID(thread::ThreadId),
     }
 
     let n: u32 = 8;
 
-    let mode = ConsType::WB;
+    let mode = ConsType::FIFO;
 
     let now = Instant::now();
 

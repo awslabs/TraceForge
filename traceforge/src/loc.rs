@@ -6,6 +6,10 @@ use crate::{
 
 use std::fmt::{Debug, Display};
 
+// Distinct unit type for async logic
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct WakeMsg;
+
 #[derive(Clone, Copy, Default, Debug, Hash, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CommunicationModel {
     // A receive can read from any matching unread send

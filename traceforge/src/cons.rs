@@ -78,7 +78,7 @@ impl Consistency {
             // slab is not read, or is read by rlab s.t. (rlab1, rlab) in porf
             if slab
                 .reader()
-                .is_none_or(|rlab| g.in_porf(rlab1.pos(), rlab))
+                .map_or(true, |rlab| g.in_porf(rlab1.pos(), rlab))
             {
                 seen.push(slab.pos());
                 if Self::aux_send_before(g, slab.pos(), slab2, seen) {
@@ -123,7 +123,7 @@ impl Consistency {
                     // Exclude the receive itself
                     reader != rpos
                         && reader.thread == rpos.thread
-                        && view.is_none_or(|view| view.0.contains(reader))
+                        && view.map_or(true, |view| view.0.contains(reader))
                 })
             } else {
                 // there is no reader, or the reader is *not* in the view (we exclude the receive itself)
@@ -192,7 +192,9 @@ impl Consistency {
         check_concurrent: bool,
     ) -> Vec<Event> {
         // Sends that the receive can read from
-        let sends = g.matching_stores(recv.recv_loc());
+        let sends = g.matching_stores(recv.recv_loc())
+            // filter-out WakeMsg in our porf prefix: the respective futures were cancelled
+            .filter(|&s| {!s.is_cancelled_wrt(recv.as_event_label())});
 
         // Keep those that will exist and be unread after the revisit, checking
         // for concurrent receives.
