@@ -984,6 +984,7 @@ impl fmt::Display for Unique {
 pub(crate) struct CToss {
     label: EventLabel,
     result: bool,
+    predetermined: bool,
 }
 
 impl CToss {
@@ -991,6 +992,7 @@ impl CToss {
         Self {
             label: EventLabel::new(pos),
             result: Self::maximal(),
+            predetermined: false,
         }
     }
 
@@ -1000,6 +1002,14 @@ impl CToss {
 
     pub(crate) fn set_result(&mut self, result: bool) {
         self.result = result
+    }
+
+    pub(crate) fn set_predetermined(&mut self) {
+        self.predetermined = true;
+    }
+
+    pub(crate) fn is_predetermined(&self) -> bool {
+        self.predetermined
     }
 
     pub(crate) fn maximal() -> bool {

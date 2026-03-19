@@ -45,10 +45,11 @@ use runtime::failure::persist_task_failure;
 use runtime::thread::continuation::{ContinuationPool, CONTINUATION_POOL};
 use runtime::thread::switch;
 
-use log::{info, trace};
+use log::{info, trace, debug};
 use serde::{Deserialize, Serialize};
 use smallvec::alloc::sync::Arc;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::future::Future;
 use std::iter;
 use std::rc::Rc;
@@ -202,6 +203,8 @@ pub struct Config {
     pub(crate) turmoil_trace_file: Option<String>,
     pub(crate) parallel: bool,
     pub(crate) parallel_workers: Option<usize>,
+    pub(crate) keep_per_execution_coverage: bool,
+    pub(crate) predetermined_choices: HashMap<String, Vec<Vec<bool>>>,    
     #[serde(skip)]
     pub(crate) callbacks: Arc<Mutex<Vec<Box<dyn ExecutionObserver + Send>>>>,
 }
@@ -262,6 +265,8 @@ impl ConfigBuilder {
             turmoil_trace_file: None,
             parallel: false,
             parallel_workers: None,
+            keep_per_execution_coverage: false,
+	        predetermined_choices: HashMap::new(),
             callbacks: Arc::new(Mutex::new(Vec::new())),
         })
     }
@@ -450,6 +455,39 @@ impl ConfigBuilder {
             .push(cb);
         self
     }
+
+    /// Enables storing per-execution coverage data across all executions.
+    /// When disabled (default), only the aggregate coverage and current execution coverage
+    /// (for ExecutionObserver callbacks) are kept, significantly reducing memory usage.
+    /// Enable this only if you need to query coverage for specific past executions.
+    pub fn with_keep_per_execution_coverage(mut self, keep: bool) -> Self {
+        self.0.keep_per_execution_coverage = keep;
+        self
+    }
+
+    /// Sets predetermined values for named nondeterministic choices.
+    ///
+    /// The map keys are choice names, and values are 2D vectors where:
+    /// - First dimension: thread index (0 = first thread to call this choice, 1 = second, etc.)
+    /// - Second dimension: occurrence within that thread (0 = first call, 1 = second, etc.)
+    ///
+    /// If a choice is not found in the map, or if indices are out of bounds,
+    /// the choice falls back to normal nondeterministic exploration.
+    ///
+    /// Example:
+    /// ```ignore
+    /// let mut choices = HashMap::new();
+    /// choices.insert("my_choice".to_string(), vec![
+    ///     vec![true, false, true],  // Thread 0: 1st=true, 2nd=false, 3rd=true
+    ///     vec![false, false],        // Thread 1: 1st=false, 2nd=false
+    /// ]);
+    /// Config::builder().with_predetermined_choices(choices).build()
+    /// ```
+    pub fn with_predetermined_choices(mut self, choices: HashMap<String, Vec<Vec<bool>>>) -> Self {
+        self.0.predetermined_choices = choices;
+        self
+    }
+	 
 
     /// Consumes the builder and produces the [`Config`]
     pub fn build(self) -> Config {
@@ -961,6 +999,143 @@ pub fn nondet() -> bool {
 pub fn coin_toss() -> bool {
     nondet()
 }
+
+/// Models a named nondeterministic boolean choice.
+///
+/// Named choices allow users to provide predetermined values via configuration,
+/// which can be useful for:
+/// - Reproducing specific behaviors
+/// - Directed testing
+/// - Reducing state space by fixing certain choices
+///
+/// If predetermined values are configured for this choice name, they will be used.
+/// Otherwise, the choice falls back to normal nondeterministic exploration.
+///
+/// Thread indices are assigned lazily (on first call to any named choice by that thread),
+/// so index 0 = first thread to use named choices, index 1 = second thread, etc.
+///
+/// # Example
+/// ```ignore
+/// use amzn_must::{named_nondet, Config};
+/// use std::collections::HashMap;
+///
+/// // Configure predetermined values
+/// let mut choices = HashMap::new();
+/// choices.insert("retry".to_string(), vec![
+///     vec![true, false, true],  // Thread 0: retry on 1st and 3rd attempts
+///     vec![false],               // Thread 1: don't retry
+/// ]);
+///
+/// amzn_must::verify(
+///     Config::builder()
+///         .with_predetermined_choices(choices)
+///         .build(),
+///     || {
+///         if named_nondet("retry") {
+///             // retry logic
+///         }
+///     }
+/// );
+/// ```
+pub fn named_nondet(name: &str) -> bool {
+    switch();
+    ExecutionState::with(|s| {
+        let pos = s.next_pos();
+        let thread_id = pos.thread;
+
+        let mut must = s.must.borrow_mut();
+
+        // Get thread index for this choice name with incremental freezing
+        // Each choice name has independent thread indexing
+        // Once a (choice_name, thread_id) pair is assigned an index, it's frozen for the entire exploration
+        let thread_idx = if let Some(name_map) = must.thread_index_map.get(name) {
+            if let Some(&idx) = name_map.get(&thread_id) {
+                // Already assigned (and frozen)
+                idx
+            } else {
+                // Thread not yet assigned for this choice name - assign and freeze immediately
+                let idx = *must.next_thread_index.get(name).unwrap_or(&0);
+                must.next_thread_index.insert(name.to_string(), idx + 1);
+
+                // Add to current execution mapping
+                must.thread_index_map
+                    .entry(name.to_string())
+                    .or_insert_with(HashMap::new)
+                    .insert(thread_id, idx);
+
+                // Immediately freeze this assignment for the rest of the exploration
+                if let Some(ref mut frozen) = must.frozen_thread_index_map {
+                    frozen
+                        .entry(name.to_string())
+                        .or_insert_with(HashMap::new)
+                        .insert(thread_id, idx);
+                    debug!(
+                        "Assigned and froze thread index {} to ThreadId {:?} for choice '{}'",
+                        idx, thread_id, name
+                    );
+                }
+
+                idx
+            }
+        } else {
+            // No mapping for this choice name yet - create and freeze immediately
+            let idx = 0;
+            must.next_thread_index.insert(name.to_string(), 1);
+
+            // Add to current execution mapping
+            let mut name_map = HashMap::new();
+            name_map.insert(thread_id, idx);
+            must.thread_index_map.insert(name.to_string(), name_map);
+
+            // Immediately freeze this assignment for the rest of the exploration
+            if let Some(ref mut frozen) = must.frozen_thread_index_map {
+                let mut frozen_name_map = HashMap::new();
+                frozen_name_map.insert(thread_id, idx);
+                frozen.insert(name.to_string(), frozen_name_map);
+                debug!(
+                    "Assigned and froze thread index {} to ThreadId {:?} for choice '{}'",
+                    idx, thread_id, name
+                );
+            }
+
+            idx
+        };
+
+        // Get and increment occurrence counter for this (name, thread_idx) pair
+        let occurrence = must
+            .choice_occurrence_counters
+            .entry((name.to_string(), thread_idx))
+            .or_insert(0);
+        let current_occurrence = *occurrence;
+        *occurrence += 1;
+
+        // Check if we have a predetermined value for this choice
+        let predetermined_value = must
+            .config
+            .predetermined_choices
+            .get(name)
+            .and_then(|thread_choices| thread_choices.get(thread_idx))
+            .and_then(|choices| choices.get(current_occurrence))
+            .copied();
+
+        if let Some(value) = predetermined_value {
+            debug!(
+                "Using predetermined value {} for choice '{}' [thread_idx={}, occurrence={}]",
+                value, name, thread_idx, current_occurrence
+            );
+            // Use handle_ctoss_predetermined which now handles both replay and handle modes
+            return must.handle_ctoss_predetermined(CToss::new(pos), value);
+        }
+
+        // Fallback to nondeterministic exploration (handles both replay and handle modes)
+        debug!(
+            "Using nondeterministic exploration for choice '{}' [thread_idx={}, occurrence={}]",
+            name, thread_idx, current_occurrence
+        );
+        must.handle_ctoss(CToss::new(pos))
+    })
+}
+	 
 
 use crate::monitor_types::{Monitor, MonitorResult};
 use std::ops::{Range, RangeInclusive};
