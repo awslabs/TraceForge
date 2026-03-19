@@ -56,11 +56,26 @@ impl Execution {
                 Some(format!("main-thread-{:?}", std::thread::current().id())),
             );
 
-            // Run the test to completion
-            while self.step() {}
-
-            // Cleanup the state before it goes out of `EXECUTION_STATE` scope
+            // Run the test 
+            let panic_payload = match panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                while self.step() {}
+            })) {
+                Ok(()) => None,
+                Err(e) => {
+                    // Deadlock or other failure panicked out of step().
+                    // Set state to Stopped so cleanup() can proceed.
+                    ExecutionState::with(|state| {
+                        state.current_task = ScheduledTask::Stopped;
+                    });
+                    Some(e)
+                }
+            };
+            
             ExecutionState::cleanup();
+
+            if let Some(payload) = panic_payload {
+                panic::resume_unwind(payload);
+            }
         });
     }
 
@@ -262,13 +277,7 @@ impl ExecutionState {
         })
     }
 
-    /// Prepare this ExecutionState to be dropped. Call this before dropping so that the tasks have
-    /// a chance to run their drop handlers while `EXECUTION_STATE` is still in scope.
     fn cleanup() {
-        // A slightly delicate dance here: we need to drop the tasks from outside of `Self::with`,
-        // because a task's Drop impl might want to call back into `ExecutionState` (to check
-        // `should_stop()`). So we pull the tasks out of the `ExecutionState`, leaving it in an
-        // invalid state, but no one should still be accessing the tasks anyway.
         let (mut tasks, final_state) = Self::with(|state| {
             assert!(
                 state.current_task == ScheduledTask::Stopped
@@ -280,14 +289,24 @@ impl ExecutionState {
             )
         });
 
-        for task in tasks.drain(..) {
-            assert!(
-                final_state == ScheduledTask::Stopped || task.finished(),
+        for task in tasks.drain(..) {                                                                                                                                                                                   
+            let finished = task.finished();
+            assert!(                                                                                                                                                                                                    
+                final_state == ScheduledTask::Stopped || finished,                                                                                                                                                    
                 "execution finished but task is not"
             );
-            Rc::try_unwrap(task.continuation)
-                .map_err(|_| ())
-                .expect("couldn't cleanup a future");
+            match Rc::try_unwrap(task.continuation) {
+                Ok(refcell) => {
+                    if !finished {
+                        let mut pc = refcell.borrow_mut();
+                        pc.cancel_gen();
+                        pc.reinitialize_generator();
+                        drop(pc);
+                    }
+                    drop(refcell);
+                }
+                Err(_) => panic!("couldn't cleanup a future"),
+            }
         }
 
         // while Self::with(|state| state.storage.pop()).is_some() {}

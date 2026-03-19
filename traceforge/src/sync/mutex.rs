@@ -294,6 +294,7 @@ impl<T: ?Sized> DerefMut for MutexGuard<'_, T> {
 
 impl<T: ?Sized> Drop for MutexGuard<'_, T> {
     fn drop(&mut self) {
+        if std::thread::panicking() { return; }
         send_tagged_msg(
             self.mutex.synchronizer,
             UNLOCK_TAG,
@@ -310,6 +311,7 @@ impl<T: ?Sized + Debug> Debug for MutexGuard<'_, T> {
 
 impl<T: ?Sized> Drop for OwnedMutexGuard<T> {
     fn drop(&mut self) {
+        if std::thread::panicking() { return; }
         send_tagged_msg(
             self.mutex.synchronizer,
             UNLOCK_TAG,
