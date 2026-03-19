@@ -29,7 +29,7 @@ use crate::thread::{main_thread_id, ThreadId};
 
 use crate::monitor_types::{EndCondition, ExecutionEnd, Monitor, MonitorResult};
 use std::any::TypeId;
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::Write;
 
@@ -121,6 +121,18 @@ pub(crate) struct Must {
     pub telemetry: Telemetry,
     published_values: BTreeMap<(ThreadId, TypeId), Val>,
     pub started_at: Instant,
+
+    // Named nondeterministic choice support
+    // Per-choice-name thread indexing: each choice name has independent thread indices
+    // Frozen mapping from first execution, used to ensure consistent thread indices across all executions
+    pub(crate) frozen_thread_index_map: Option<HashMap<String, HashMap<ThreadId, usize>>>,
+    // Current execution's mapping (built during first execution, then copied from frozen)
+    // Map: choice_name -> (ThreadId -> thread_idx)
+    pub(crate) thread_index_map: HashMap<String, HashMap<ThreadId, usize>>,
+    // Next available index for each choice name
+    pub(crate) next_thread_index: HashMap<String, usize>,
+    // Per-execution counters: (choice_name, thread_idx) -> occurrence count
+    pub(crate) choice_occurrence_counters: HashMap<(String, usize), usize>,
 }
 
 impl Must {
@@ -131,7 +143,7 @@ impl Must {
         {
             info!("Random schedule seed: {:?}", seed);
         }
-        let telemetry = Telemetry::default();
+        let telemetry = Telemetry::new(conf.keep_per_execution_coverage);
         let _ = telemetry.register_counter(&EXECS.to_owned());
         let _ = telemetry.register_counter(&BLOCKED.to_owned());
         let _ = telemetry.register_histogram(&EXECS_EST.to_owned());
@@ -150,6 +162,10 @@ impl Must {
             telemetry,
             published_values: BTreeMap::new(),
             started_at: Instant::now(),
+            frozen_thread_index_map: None,
+            thread_index_map: HashMap::new(),
+            next_thread_index: HashMap::new(),
+            choice_occurrence_counters: HashMap::new(),
         }
     }
 
@@ -167,6 +183,31 @@ impl Must {
         let mut must = must.borrow_mut();
         must.current.graph.initialize_for_execution();
         must.telemetry.coverage.new_eid();
+
+        // Reset per-execution state for named choices
+        // Initialize frozen mapping if not yet created (first execution)
+        if must.frozen_thread_index_map.is_none() {
+            must.frozen_thread_index_map = Some(HashMap::new());
+            debug!("Initialized empty frozen thread index mapping for incremental freezing");
+        }
+
+        // Restore from frozen mapping (which grows incrementally as threads are discovered)
+        let frozen_map = must.frozen_thread_index_map.as_ref().unwrap().clone();
+        must.thread_index_map = frozen_map.clone();
+        // Restore next_thread_index for each choice name
+        must.next_thread_index = frozen_map
+            .iter()
+            .map(|(name, map)| (name.clone(), map.len()))
+            .collect();
+
+        if !frozen_map.is_empty() {
+            let total_mappings: usize = frozen_map.values().map(|m| m.len()).sum();
+            debug!("Restored frozen thread index mapping for {} choice names with {} total thread mappings",
+                frozen_map.len(), total_mappings);
+        }
+
+        must.choice_occurrence_counters.clear();
+
         // TODO: when must is borrowed, the panic handler cannot capture
         // a counterexample. run_metrics_before() invokes must model code
         // that might panic, and it would be nice to refactor the code so that
@@ -528,6 +569,35 @@ impl Must {
         CToss::maximal()
     }
 
+    /// Handle a CToss with a predetermined value. Similar to handle_ctoss but does not add revisits.
+    pub(crate) fn handle_ctoss_predetermined(&mut self, mut ctlab: CToss, value: bool) -> bool {
+        if self.is_replay(ctlab.pos()) {
+            info!(
+                "| Replay Mode for {} with predetermined value {}",
+                ctlab, value
+            );
+            // In replay mode, validate the event exists and process it
+            ctlab.set_result(value);
+            ctlab.set_predetermined();
+            let lab = LabelEnum::CToss(ctlab);
+            self.current.graph.validate_replay_event(&lab);
+            self.process_event(lab);
+            // Return the predetermined value (ignoring what was in the graph)
+            return value;
+        }
+
+        info!(
+            "| Handle Mode for {} with predetermined value {}",
+            ctlab, value
+        );
+
+        ctlab.set_result(value);
+        ctlab.set_predetermined();
+        self.add_to_graph(LabelEnum::CToss(ctlab));
+        // Note: We don't add a revisit here because the value is predetermined
+        value
+    }    
+
     pub(crate) fn handle_choice(&mut self, chlab: Choice) -> usize {
         let result = chlab.result();
         let end = *chlab.range().end();
@@ -765,38 +835,7 @@ impl Must {
     /// Check if the execution is blocked. Return None if it's not blocked, or Some(Block)
     /// to tell why it is blocked.
     fn check_blocked(&mut self) -> Option<BlockType> {
-        for i in self.current.graph.thread_ids() {
-            if self.current.graph.is_thread_blocked(i) {
-                // find reason for block
-
-                // if the thread is daemon and blocked on a recv, mark it as "normal"
-
-                // if the thread is blocked on assume, print information on the execution
-                // otherwise raise an error (deadlock)
-
-                let blab = self.current.graph.thread_last(i).unwrap();
-                match blab {
-                    LabelEnum::Block(b) => {
-                        match b.btype() {
-                            BlockType::Value(loc) => {
-                                if self.current.graph.is_thread_daemon(i) {
-                                    // daemon threads can keep waiting on messages
-                                    debug!("Thread {i} is a daemon, keep going");
-                                    continue;
-                                } else {
-                                    return Some(BlockType::Value(loc.clone()));
-                                }
-                            }
-                            block => {
-                                return Some(block.clone());
-                            }
-                        }
-                    }
-                    _ => panic!("Blocked thread has unexpected last label {}", blab),
-                }
-            }
-        }
-        None
+        self.current.graph.check_blocked()    
     }
 
     /// `complete_execution` is invoked when a particular single execution has finished.
@@ -973,6 +1012,9 @@ impl Must {
                 self.telemetry.coverage.export_current().into(),
             );
         }
+
+        // Clean up per-execution coverage data after observers have been notified
+	    self.telemetry.coverage.cleanup_current_execution();
     }
 
     fn visit_rfs(&mut self, pos: Event, blocking: bool) -> Option<Val> {
@@ -1163,7 +1205,11 @@ impl Must {
     fn is_maximal(&self, lab: &LabelEnum, rev: &Revisit) -> bool {
         match lab {
             LabelEnum::RecvMsg(rlab) => self.is_maximal_recv(rlab, rev),
-            LabelEnum::CToss(ctlab) => ctlab.result() == CToss::maximal(),
+            // Predetermined CToss events are always maximal: they are not branching
+            // points, so no forward revisit exists to discover blocked backward revisits.
+            LabelEnum::CToss(ctlab) => {
+                ctlab.is_predetermined() || ctlab.result() == CToss::maximal()
+            }
             // Instead of checking if a send is read by a stamp-earlier receive,
             // we handle this via the revisitable flag on the corresponding receive.
             LabelEnum::SendMsg(slab) => !slab.is_dropped(),

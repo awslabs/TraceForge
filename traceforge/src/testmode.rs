@@ -56,7 +56,6 @@ pub fn test<F>(mut config: Config, f: F, samples: u64) -> f64
 where
     F: Fn() + Send + Sync + 'static,
 {
-    config.max_iterations = Some(1);
     config.schedule_policy = SchedulePolicy::Arbitrary;
 
     let f = Arc::new(f);

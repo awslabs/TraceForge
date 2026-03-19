@@ -382,6 +382,42 @@ impl ExecutionGraph {
         self.get_thr(&t).tclab.daemon()
     }
 
+    /// Check if this execution graph represents a blocked execution.
+    /// Returns the BlockType if blocked, None if all threads completed normally.
+    /// Daemon threads are only skipped for Value blocks.
+    pub(crate) fn check_blocked(&self) -> Option<BlockType> {
+        let mut ret = None;
+        for t in self.thread_ids() {
+            if self.is_thread_blocked(t) {
+                let blab = self.thread_last(t).unwrap();
+                match blab {
+                    LabelEnum::Block(b) => match b.btype() {
+                        BlockType::Assume => {
+                            return Some(BlockType::Assume);
+                        }
+                        BlockType::Assert => {
+                            return Some(BlockType::Assert);
+                        }
+                        BlockType::Value(loc) => {
+                            if self.is_thread_daemon(t) {
+                                continue;
+                            } else {
+                                ret = Some(BlockType::Value(loc.clone()));
+                            }
+                        }
+                        block => {
+                            ret = Some(block.clone());
+                        }
+                    },
+                    _ => panic!("Blocked thread has unexpected last label {}", blab),
+                }
+            }
+        }
+        ret
+    }
+	 
+	
+
     /// Add a label to the graph, giving it a new stamp if it does not have one.
     pub(crate) fn add_label(&mut self, lab: LabelEnum) -> Event {
         self.add(lab).pos()

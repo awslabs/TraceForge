@@ -423,7 +423,7 @@ impl HistogramFn for Handle {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct Telemetry {
     inner: Arc<Mutex<HashMap<Key, Value>>>,
 
@@ -431,11 +431,11 @@ pub(crate) struct Telemetry {
 }
 
 impl Telemetry {
-    pub fn new() -> Self {
+    pub fn new(keep_per_execution_coverage: bool) -> Self {
         let hm: HashMap<Key, Value> = HashMap::new();
         Self {
             inner: Arc::new(Mutex::new(hm)),
-            coverage: CoverageTelemetry::new(),
+            coverage: CoverageTelemetry::new(keep_per_execution_coverage),
         }
     }
 
@@ -607,7 +607,7 @@ pub(crate) type ModuleFileLine = (&'static str, &'static str, u32);
     associated coverage information as well as the aggregate coverage and information about the execution id
 
 */
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct CoverageTelemetry {
     // per execution statistics about hitting a coverage goal
     perexec: Arc<Mutex<HashMap<ExecutionId, Coverage>>>,
@@ -619,15 +619,19 @@ pub(crate) struct CoverageTelemetry {
 
     // execution id generator for the must engine: each execution gets a unique id
     idgen: ExecutionIdGenerator,
+     
+    // whether to keep per-execution coverage data across all executions
+    keep_per_execution_coverage: bool,
 }
 
 impl CoverageTelemetry {
-    pub fn new() -> Self {
+    pub fn new(keep_per_execution_coverage: bool) -> Self {
         Self {
             perexec: Arc::new(Mutex::new(HashMap::new())),
             aggregate: Arc::new(Mutex::new(Coverage::new())),
             unique_table: Arc::new(Mutex::new(HashMap::new())),
             idgen: ExecutionIdGenerator::new(),
+            keep_per_execution_coverage,
         }
     }
 
@@ -819,11 +823,25 @@ impl CoverageTelemetry {
             Some(thistable) => thistable.clone(),
         }
     }
+
+    /// Cleans up the per-execution coverage data for the current execution if not configured to keep it.
+    /// This should be called after ExecutionObserver callbacks have been invoked.
+    pub fn cleanup_current_execution(&self) {
+        if !self.keep_per_execution_coverage {
+            let eid = self.current_eid();
+            let mut hm = self.perexec.lock().expect("Could not lock coverage table");
+            hm.remove(&eid);
+            debug!(
+                "Cleaned up per-execution coverage data for execution {}",
+                eid
+            );
+        }
+    }
 }
 
 #[test]
 fn cov_telemetry_basic() {
-    let mut cv = CoverageTelemetry::new();
+    let mut cv = CoverageTelemetry::new(true);
     let eid = cv.new_eid();
     cv.cover(eid, "B".to_owned(), std::module_path!(), "foo", 1);
     cv.cover(eid, "C".to_owned(), std::module_path!(), "foo", 2);
