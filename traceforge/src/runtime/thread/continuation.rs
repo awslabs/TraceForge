@@ -8,6 +8,7 @@ use crate::runtime::execution::ExecutionState;
 use generator::{Generator, Gn};
 use scoped_tls::scoped_thread_local;
 use std::cell::{Cell, RefCell};
+use std::mem::ManuallyDrop;
 use std::collections::VecDeque;
 use std::ops::Deref;
 use std::ops::DerefMut;
@@ -24,7 +25,7 @@ scoped_thread_local! {
 /// to run via `initialize`. A continuation is only reusable if the previous function it was
 /// executing completed.
 pub(crate) struct Continuation {
-    generator: Generator<'static, ContinuationInput, ContinuationOutput>,
+    generator: ManuallyDrop<Generator<'static, ContinuationInput, ContinuationOutput>>,
     function: ContinuationFunction,
     state: ContinuationState,
 }
@@ -96,11 +97,40 @@ impl Continuation {
         debug_assert_eq!(ret, ContinuationOutput::Finished);
 
         Self {
-            generator: gen,
+            generator: ManuallyDrop::new(gen), 
             function,
             state: ContinuationState::NotReady,
         }
     }
+
+    /// Reinitialize a cancelled/stuck continuation so it can be reused.
+    /// This reuses the existing mmap'd stack (no new allocation).
+    pub fn reinitialize_generator(&mut self) {
+        // Clear any unconsumed function left in the cell
+        self.function.0.take();
+
+        let function = self.function.clone();
+        self.generator.init_code(move || {
+            let _ = &function;
+            loop {
+                match generator::yield_(ContinuationOutput::Finished) {
+                    None | Some(ContinuationInput::Exit) => break,
+                    _ => (),
+                }
+                let f = function.0.take().expect("must have a function to run");
+                f();
+            }
+            ContinuationOutput::Exited
+        });
+        let ret = self.generator.resume().unwrap();
+        debug_assert_eq!(ret, ContinuationOutput::Finished);
+        self.state = ContinuationState::NotReady;
+    }
+
+    pub fn cancel_gen(&mut self) {
+        self.generator.cancel();
+    }
+	 
 
     /// Provide a new function for the continuation to execute. The continuation must
     /// be in reusable state.
@@ -158,10 +188,12 @@ impl Drop for Continuation {
         // arbitrary user code. Its resources will still be cleaned up when the underlying
         // generator is dropped, but doing so is slower (the generator impl invokes a panic
         // inside the continuation), so this drop handler exists to avoid it when possible.
-        if self.reusable() {
+        let reusable = self.reusable();
+        if reusable {
             let ret = self.resume_with_input(ContinuationInput::Exit);
             debug_assert_eq!(ret, ContinuationOutput::Exited);
         }
+        // implicit: self.generator drops here → StackBox::drop → munmap?
     }
 }
 
@@ -232,7 +264,8 @@ pub(crate) struct PooledContinuation {
 impl Drop for PooledContinuation {
     fn drop(&mut self) {
         let c = self.continuation.take().unwrap();
-        if c.reusable() {
+        let reusable = c.reusable();
+        if reusable {
             self.queue.borrow_mut().push_back(c);
         }
     }
@@ -263,6 +296,13 @@ unsafe impl Send for PooledContinuation {}
 
 /// Possibly yield back to the executor to perform a context switch.
 pub(crate) fn switch() {
+    // During panic unwinding (including the Cancel-panic triggered by
+    // raw_cancel() to clean up non-reusable generators), do not attempt
+    // a context switch. Yielding during Cancel-unwind would interrupt
+    // the unwind and leave the generator in an inconsistent state.
+    if std::thread::panicking() {
+        return;
+    }
     if ExecutionState::maybe_yield() {
         let r = generator::yield_(ContinuationOutput::Yielded).unwrap();
         assert!(matches!(r, ContinuationInput::Resume));

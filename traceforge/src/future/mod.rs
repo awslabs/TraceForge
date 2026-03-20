@@ -376,28 +376,9 @@ impl<T> JoinHandle<T> {
     pub fn thread(&self) -> &Thread {
         &self.thread
     }
-}
 
-// TODO: need to work out all the error cases here
-/// Task failed to execute to completion.
-#[derive(Debug)]
-pub enum JoinError {
-    /// Task was aborted
-    Cancelled,
-}
-
-impl Display for JoinError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            JoinError::Cancelled => write!(f, "task was cancelled"),
-        }
-    }
-}
-
-impl Error for JoinError {}
-
-impl<T> Drop for JoinHandle<T> {
-    fn drop(&mut self) {
+    // Useful for the Drop implementation
+    pub fn abort(&self) {
         // If a Join Handle for a spawned task is never awaited, one could abort the task by calling `self.abort()`
         // But this may mean that certain side effects (message sends or receives) of the task
         // do not get to run.
@@ -424,6 +405,37 @@ impl<T> Drop for JoinHandle<T> {
             let ack = self.com.receiver.recv_msg_block();
             assert!(matches!(ack, PollerMsg::Done));
         }
+    }
+}
+
+// TODO: need to work out all the error cases here
+/// Task failed to execute to completion.
+#[derive(Debug)]
+pub enum JoinError {
+    /// Task was aborted
+    Cancelled,
+}
+
+impl Display for JoinError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            JoinError::Cancelled => write!(f, "task was cancelled"),
+        }
+    }
+}
+
+impl Error for JoinError {}
+
+impl<T> Drop for JoinHandle<T> {
+    fn drop(&mut self) {
+        // Skip during panic unwinding. raw_cancel() triggers a Cancel-panic
+        // inside generators to unwind their stacks; calling Must API
+        // (send_msg, recv_msg_block) during that unwinding would cause a
+        // nested panic and abort.
+        if std::thread::panicking() {
+            return;
+        }
+        self.abort();
     }
 }
 

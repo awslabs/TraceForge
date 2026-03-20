@@ -73,6 +73,84 @@ impl<T: Message + Clone + 'static> Receiver<T> {
     }
 }
 
+pub fn unbounded_channel<T>() -> (UnboundedSender<T>, UnboundedReceiver<T>)
+where
+    T: Clone + std::fmt::Debug + PartialEq + Message + 'static,
+{
+    let (tx, rx) = crate::channel::Builder::<T>::new().build();
+    (UnboundedSender::new(tx), UnboundedReceiver::new(rx))
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct UnboundedSender<T> {
+    sender: crate::channel::Sender<T>,
+}
+
+unsafe impl<T: Send> Send for UnboundedSender<T> {}
+
+unsafe impl<T: Sync> Sync for UnboundedSender<T> {}
+
+impl<T: Message + 'static> UnboundedSender<T> {
+    fn new(sender: crate::channel::Sender<T>) -> Self {
+        UnboundedSender { sender }
+    }
+    pub fn send(&self, v: T) -> Result<(), error::SendError<T>> {
+        self.sender.send_msg(v);
+        Ok(())
+    }
+
+    pub fn try_send(&self, v: T) -> Result<(), error::TrySendError<T>> {
+        self.sender.send_msg(v);
+        Ok(())
+    }
+
+    pub fn is_closed(&self) -> bool {
+        nondet()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct UnboundedReceiver<T> {
+    receiver: crate::channel::Receiver<T>,
+}
+unsafe impl<T: Send> Send for UnboundedReceiver<T> {}
+
+unsafe impl<T: Sync> Sync for UnboundedReceiver<T> {}
+
+impl<T: Message + Clone + 'static> UnboundedReceiver<T> {
+    fn new(receiver: crate::channel::Receiver<T>) -> Self {
+        UnboundedReceiver { receiver }
+    }
+
+    // This is incomplete as it does not model receive errors.
+    // A complete implementation would non-deterministically return None.
+    pub async fn recv(&self) -> Option<T> {
+        info!("This is an incomplete implementation. It never returns None");
+        Some(self.receiver.async_recv_msg().await)
+    }
+
+    // This is incomplete as it does not model receive errors.
+    // A complete implementation would non-deterministically return an error.
+    pub fn try_recv(&self) -> Result<T, error::TryRecvError> {
+        info!("This is an incomplete implementation. It never returns errors");
+        Ok(self.receiver.recv_msg_block())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        nondet()
+    }
+
+    pub fn len(&self) -> usize {
+        nondet() as usize
+    }
+
+    pub fn close(&mut self) {}
+
+    pub fn is_closed(&self) -> bool {
+        nondet()
+    }
+}
+
 pub mod error {
     //! Channel error types.
 

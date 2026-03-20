@@ -227,6 +227,7 @@ impl<T: ?Sized + fmt::Debug> fmt::Debug for RwLockWriteGuard<'_, T> {
 
 impl<T: ?Sized> Drop for RwLockReadGuard<'_, T> {
     fn drop(&mut self) {
+        if std::thread::panicking() { return; }
         let tid = self.lock.backing_tid;
         crate::send_tagged_msg(
             tid,
@@ -239,6 +240,7 @@ impl<T: ?Sized> Drop for RwLockReadGuard<'_, T> {
 
 impl<T: ?Sized> Drop for RwLockWriteGuard<'_, T> {
     fn drop(&mut self) {
+        if std::thread::panicking() { return; }
         let tid = self.lock.backing_tid;
         crate::send_tagged_msg(
             tid,
@@ -316,6 +318,7 @@ where
 
 impl<T: ?Sized, U: ?Sized> Drop for OwnedRwLockReadGuard<T, U> {
     fn drop(&mut self) {
+        if std::thread::panicking() { return; }
         let tid = self.lock.backing_tid;
         crate::send_tagged_msg(
             tid,
@@ -353,6 +356,7 @@ where
 
 impl<T: ?Sized, U: ?Sized> Drop for OwnedRwLockWriteGuard<T, U> {
     fn drop(&mut self) {
+        if std::thread::panicking() { return; }
         let tid = self.lock.backing_tid;
         crate::send_tagged_msg(
             tid,

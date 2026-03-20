@@ -11,6 +11,7 @@ use traceforge::{cover, future, nondet, recv_msg_block, send_msg, thread, Config
 use futures::future::{join_all, pending, select, select_all, Either};
 use futures::prelude::*;
 use futures::stream::FuturesUnordered;
+use traceforge::TypeNondet;
 
 const TEST_RUNS: i32 = 20;
 
@@ -911,4 +912,92 @@ fn no_await() {
     // the async_recv is dropped, it receives the cancellation message and
     // terminates successfully.
     assert_eq!(stats.execs, 1);
+}
+
+pub use tokio::time::{Duration, Instant};
+
+pub struct Interval {
+    period: Duration,
+    ticks_remaining: usize,
+}
+
+impl Interval {
+    pub async fn tick(&mut self) {
+        if self.ticks_remaining > 0 {
+            self.ticks_remaining -= 1;
+
+            std::future::poll_fn(|_cx| {
+                if <bool>::nondet() {
+                    std::task::Poll::Ready(())
+                } else {
+                    std::task::Poll::Pending
+                }
+            })
+            .await
+        } else {
+            // No more ticks, return only Pending
+            std::future::poll_fn(|_cx| {
+                std::task::Poll::Pending
+            })
+            .await
+        }
+    }
+
+    pub fn reset(&mut self) {}
+
+    pub fn reset_immediately(&mut self) {}
+
+    pub fn period(&self) -> Duration {
+        self.period
+    }
+}
+
+pub fn interval(period: Duration) -> Interval {
+    Interval {
+        period,
+        ticks_remaining: 1,
+    }
+}
+
+pub fn interval_at(_start: tokio::time::Instant, period: Duration) -> Interval {
+    interval(period)
+}
+
+#[test]
+fn cancel_recv_macro_select() {
+    for _ in 0..10 {
+        let stats = traceforge::verify(
+            Config::builder()
+                .with_verbose(0)
+                .with_policy(SchedulePolicy::Arbitrary)
+                .build(),
+            || {
+                future::block_on(async {
+                    let (sender1, receiver1) = traceforge::sync::mpsc::unbounded_channel::<u32>();
+
+                    let mut wait_interval: Interval = interval_at(Instant::now(), Duration::from_millis(500));
+
+                    thread::spawn(move || {
+                        let _ = sender1.send(1);
+                    });
+
+                    loop {
+                        tokio::select! { 
+                            biased;   
+                            _ = wait_interval.tick() => {
+                                traceforge::send_msg(traceforge::thread::construct_thread_id(0),format!("timer ticked").to_string());
+                                0u32
+                            },                                                                                                                                                               
+                            val = receiver1.recv() => {
+                                traceforge::send_msg(traceforge::thread::construct_thread_id(0),format!("val received").to_string());
+                                val.expect("this should have something")
+                            },                                                                                                                                                              
+                        };
+                    }
+                });
+            },
+        );
+        assert_eq!(stats.execs, 0);
+        assert_eq!(stats.block, 6);
+    }
 }
