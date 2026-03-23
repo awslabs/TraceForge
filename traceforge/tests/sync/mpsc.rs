@@ -14,9 +14,9 @@ fn single_producer() {
         });
         // adding the following line would bring down the finished execution to 1 and blocked execution to 0, why?
         // t.join().unwrap();
-        assert(rx.recv().unwrap() == 10);
-        assert(rx.recv().unwrap() == 20);
-        assert(rx.recv().unwrap() == 30);
+        assert(rx.try_recv().unwrap() == 10);
+        assert(rx.try_recv().unwrap() == 20);
+        assert(rx.try_recv().unwrap() == 30);
     };
 
     let stats = verify(
@@ -45,7 +45,7 @@ fn multiple_producer() {
         }
 
         for _ in 0..n {
-            let j = rx.recv().unwrap();
+            let j = rx.try_recv().unwrap();
             assert(0 <= j && j < 10);
         }
     };
