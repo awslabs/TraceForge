@@ -69,9 +69,6 @@ impl<T: Message + Clone + 'static> Receiver<T> {
     // This is incomplete as it does not model receive errors.
     // A complete implementation would non-deterministically return an error.
     pub fn try_recv(&self) -> Result<T, error::TryRecvError> {
-        // info!("This is an incomplete implementation. It never returns errors");
-        // //Ok(self.receiver.recv_msg_block())
-        // Ok(self.receiver.recv_msg_block())
         info!(
             "This is an incomplete implementation. It returns Empty only when 
             sending some special message containing the string mpscClose"
