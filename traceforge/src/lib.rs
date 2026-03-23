@@ -1153,8 +1153,10 @@ pub fn named_nondet(name: &str) -> bool {
             "Using nondeterministic exploration for choice '{}' [thread_idx={}, occurrence={}]",
             name, thread_idx, current_occurrence
         );
+        // Release the mutable borrow so gen_bool() and handle_ctoss() can each borrow independently.
+        drop(must);
         let toss = s.must.borrow_mut().gen_bool();
-        must.handle_ctoss(CToss::new(pos, toss))
+        s.must.borrow_mut().handle_ctoss(CToss::new(pos, toss))
     })
 }
 	 
