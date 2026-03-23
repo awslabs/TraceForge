@@ -985,14 +985,16 @@ pub(crate) struct CToss {
     label: EventLabel,
     result: bool,
     predetermined: bool,
+    maximal: bool,
 }
 
 impl CToss {
-    pub(crate) fn new(pos: Event) -> Self {
+    pub(crate) fn new(pos: Event, init_value: bool) -> Self {
         Self {
             label: EventLabel::new(pos),
-            result: Self::maximal(),
+            result: init_value,
             predetermined: false,
+            maximal: init_value,
         }
     }
 
@@ -1012,8 +1014,8 @@ impl CToss {
         self.predetermined
     }
 
-    pub(crate) fn maximal() -> bool {
-        false
+    pub(crate) fn maximal(&self) -> bool {
+        self.maximal
     }
 }
 

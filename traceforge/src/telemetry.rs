@@ -423,7 +423,7 @@ impl HistogramFn for Handle {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Telemetry {
     inner: Arc<Mutex<HashMap<Key, Value>>>,
 
@@ -607,7 +607,7 @@ pub(crate) type ModuleFileLine = (&'static str, &'static str, u32);
     associated coverage information as well as the aggregate coverage and information about the execution id
 
 */
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct CoverageTelemetry {
     // per execution statistics about hitting a coverage goal
     perexec: Arc<Mutex<HashMap<ExecutionId, Coverage>>>,
