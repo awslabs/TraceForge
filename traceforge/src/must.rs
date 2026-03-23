@@ -169,6 +169,34 @@ impl Must {
         }
     }
 
+    /// Resets the Must instance for a new sample exploration.
+    /// This avoids reallocating the entire Must struct between samples,
+    /// reducing heap fragmentation and memory overhead.
+    pub(crate) fn reset_for_sample(&mut self, seed: u64) {
+        self.states.clear();
+        self.current = MustState::new();
+        self.monitors.clear();
+        self.published_values.clear();
+        self.stop = false;
+        self.warn_limit = 1;
+        self.config.seed = seed;
+        self.rng = Pcg64Mcg::seed_from_u64(seed);
+        self.replay_info = REPLAY::ReplayInformation::new(self.config.clone(), false);
+        self.telemetry = Telemetry::default();
+        let _ = self.telemetry.register_counter(&EXECS.to_owned());
+        let _ = self.telemetry.register_counter(&BLOCKED.to_owned());
+        let _ = self.telemetry.register_histogram(&EXECS_EST.to_owned());
+        self.frozen_thread_index_map = None;
+        self.thread_index_map.clear();
+        self.next_thread_index.clear();
+        self.choice_occurrence_counters.clear();
+
+    }
+
+    pub(crate) fn gen_bool(&mut self) -> bool {
+        self.rng.gen_range(0..=1) == 0
+    }
+	 
     pub(crate) fn current() -> Option<Rc<RefCell<Must>>> {
         CURRENT_MUST.with(|current_must| current_must.borrow().clone())
     }
@@ -553,6 +581,7 @@ impl Must {
             panic!();
         }
         info!("| Handle Mode for {}", ctlab);
+        let maximal = ctlab.maximal();
 
         let pos = self.add_to_graph(LabelEnum::CToss(ctlab));
         let stamp = self.current.graph.label(pos).stamp();
@@ -566,7 +595,7 @@ impl Must {
             stamp,
             RevisitEnum::new_forward(pos, Event::new_init()),
         );
-        CToss::maximal()
+        maximal
     }
 
     /// Handle a CToss with a predetermined value. Similar to handle_ctoss but does not add revisits.
@@ -1034,7 +1063,7 @@ impl Must {
                     self.telemetry
                         .histogram(EXECS_EST.to_owned(), (rfs.len() + 1) as f64);
 
-                    let idx = rand::thread_rng().gen_range(0..=rfs.len());
+                    let idx = self.rng.gen_range(0..=rfs.len());
 
                     info!("| Choosing {} out of {}", idx, rfs.len());
 
@@ -1063,7 +1092,7 @@ impl Must {
                 self.telemetry
                     .histogram(EXECS_EST.to_owned(), rfs.len() as f64);
 
-                let idx = rand::thread_rng().gen_range(0..=(rfs.len() - 1));
+                let idx = self.rng.gen_range(0..=(rfs.len() - 1));
 
                 info!("| Choosing {} out of {}", idx, rfs.len());
 
@@ -1208,7 +1237,7 @@ impl Must {
             // Predetermined CToss events are always maximal: they are not branching
             // points, so no forward revisit exists to discover blocked backward revisits.
             LabelEnum::CToss(ctlab) => {
-                ctlab.is_predetermined() || ctlab.result() == CToss::maximal()
+                ctlab.is_predetermined() || ctlab.result() == ctlab.maximal()
             }
             // Instead of checking if a send is read by a stamp-earlier receive,
             // we handle this via the revisitable flag on the corresponding receive.
@@ -1341,7 +1370,7 @@ impl Must {
                 }
                 return false;
             }
-            let rev = { pop_worklist(&mut self.current.rqueue) };
+            let rev = { pop_worklist(&mut self.current.rqueue, self.config.schedule_policy == SchedulePolicy::Arbitrary, &mut self.rng) };
             if self.config.verbose >= 3 {
                 println!("Revisit {} <= {}", rev.pos(), rev.rev());
                 println!("Before graph:");
@@ -1793,14 +1822,22 @@ fn push_worklist(worklist: &mut RQueue, stamp: usize, r: RevisitEnum) {
     alts.push(r);
 }
 
-fn pop_worklist(worklist: &mut RQueue) -> RevisitEnum {
+fn pop_worklist(worklist: &mut RQueue, is_arbitrary: bool, rng: &mut Pcg64Mcg) -> RevisitEnum {
     let (stamp, rev, is_empty) = {
         let (stamp, revs) = worklist
             .iter_mut()
             .next_back()
             .expect("worklist is not empty");
-        let rev = revs.pop().unwrap();
-        (*stamp, rev, revs.is_empty())
+        if (!is_arbitrary) {
+            let rev = revs.pop().unwrap();
+            (*stamp, rev, revs.is_empty())
+        }
+        else {
+            // Choose randomly from alternatives at the highest stamp
+	        let idx = rng.gen_range(0..revs.len());
+	        let rev = revs.swap_remove(idx);
+            (*stamp, rev, revs.is_empty())
+        }
     };
     if is_empty {
         worklist.remove(&stamp);

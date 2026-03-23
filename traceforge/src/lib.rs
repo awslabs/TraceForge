@@ -611,6 +611,26 @@ where
     must.borrow_mut().run_metrics_at_end();
 }
 
+/// This allows the caller to reuse a single pool across many explorations, avoiding
+/// repeated mmap/munmap of green-thread stacks.
+fn explore_with_pool<F>(must: &Rc<RefCell<must::Must>>, f: &Arc<F>)
+where
+    F: Fn() + Send + Sync + 'static,
+{
+    must.borrow_mut().started_at = Instant::now();
+    Must::set_current(Some(must.clone()));
+    loop {
+        let f = Arc::clone(f);
+        let execution = Execution::new(Rc::clone(must));
+        Must::begin_execution(must);
+        execution.run(move || f());
+        if Must::complete_execution(must) {
+            break;
+        }
+    }
+    must.borrow_mut().run_metrics_at_end();
+}
+
 ///
 /// Monitor API
 ///
@@ -989,7 +1009,8 @@ pub fn nondet() -> bool {
     switch();
     ExecutionState::with(|s| {
         let pos = s.next_pos();
-        s.must.borrow_mut().handle_ctoss(CToss::new(pos))
+        let toss = s.must.borrow_mut().gen_bool();
+        s.must.borrow_mut().handle_ctoss(CToss::new(pos, toss))
     })
 }
 #[deprecated(
@@ -1124,7 +1145,7 @@ pub fn named_nondet(name: &str) -> bool {
                 value, name, thread_idx, current_occurrence
             );
             // Use handle_ctoss_predetermined which now handles both replay and handle modes
-            return must.handle_ctoss_predetermined(CToss::new(pos), value);
+            return must.handle_ctoss_predetermined(CToss::new(pos, value), value);
         }
 
         // Fallback to nondeterministic exploration (handles both replay and handle modes)
@@ -1132,7 +1153,8 @@ pub fn named_nondet(name: &str) -> bool {
             "Using nondeterministic exploration for choice '{}' [thread_idx={}, occurrence={}]",
             name, thread_idx, current_occurrence
         );
-        must.handle_ctoss(CToss::new(pos))
+        let toss = s.must.borrow_mut().gen_bool();
+        must.handle_ctoss(CToss::new(pos, toss))
     })
 }
 	 
@@ -1150,7 +1172,8 @@ impl TypeNondet for bool {
         switch();
         ExecutionState::with(|s| {
             let pos = s.next_pos();
-            s.must.borrow_mut().handle_ctoss(CToss::new(pos))
+            let toss = s.must.borrow_mut().gen_bool();
+            s.must.borrow_mut().handle_ctoss(CToss::new(pos, toss))
         })
     }
 }

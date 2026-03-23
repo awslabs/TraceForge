@@ -23,6 +23,12 @@ pub(crate) struct ThreadInfo {
     pub(crate) labels: Vec<LabelEnum>,
 }
 
+impl ThreadInfo {
+    pub(crate) fn name(&self) -> Option<&str> {
+        self.tclab.name().as_deref()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct ExecutionGraph {
     pub(crate) threads: IndexedMap<ThreadInfo>,

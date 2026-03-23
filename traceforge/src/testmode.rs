@@ -1,6 +1,7 @@
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use crate::{must::Must, Config, SchedulePolicy, Stats};
+use crate::runtime::thread::continuation::{ContinuationPool, CONTINUATION_POOL};
 
 use rand::{prelude::*, RngCore};
 use rand_pcg::Pcg64Mcg;
@@ -60,17 +61,29 @@ where
 
     let f = Arc::new(f);
 
+    let mut seed = config.seed;
     let mut rng = Pcg64Mcg::seed_from_u64(config.seed);
 
-    for i in 0..samples {
-        config.seed = rng.next_u64();
-        let must = Rc::new(RefCell::new(Must::new(config.clone(), false)));
-        crate::explore(&must, &f);
+    let must = Rc::new(RefCell::new(Must::new(config, false)));
 
-        let progress_desc = format!("Executions attempted so far: {}", i);
-        if Must::should_report(i) {
-            println!("{}", progress_desc);
+    // Create a single ContinuationPool for the entire test run so that
+    // green-thread stacks (mmap'd memory) are reused across samples
+    // instead of being leaked on every pool drop.
+    let pool = ContinuationPool::new();
+    CONTINUATION_POOL.set(&pool, || {
+        for i in 0..samples {
+            must.borrow_mut().reset_for_sample(seed);
+            crate::explore_with_pool(&must, &f);
+
+            let progress_desc = format!("Executions attempted so far: {}", i);
+            if Must::should_report(i) {
+                println!("{}", progress_desc);
+            }
+            seed = rng.next_u64();
         }
-    }
+    });
+
+    // Clear the thread-local reference so the Must instance can be dropped
+    Must::set_current(None);
     0.0
 }
