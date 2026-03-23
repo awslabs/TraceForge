@@ -429,7 +429,7 @@ impl Error for JoinError {}
 impl<T> Drop for JoinHandle<T> {
     fn drop(&mut self) {
         // Skip during panic unwinding. raw_cancel() triggers a Cancel-panic
-        // inside generators to unwind their stacks; calling Must API
+        // inside generators to unwind their stacks; calling Traceforge API
         // (send_msg, recv_msg_block) during that unwinding would cause a
         // nested panic and abort.
         if std::thread::panicking() {

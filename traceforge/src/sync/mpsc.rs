@@ -31,12 +31,15 @@ impl<T: Message + 'static> Sender<T> {
         Ok(())
     }
     pub fn try_send(&self, v: T) -> Result<(), TrySendError<T>> {
-        if nondet() {
+        if named_nondet("mpsc::Sender::try_send") {
             self.sender.send_msg(v);
             Ok(())
         } else {
             Err(TrySendError::Full(v))
         }
+    }
+    pub fn is_closed(&self) -> bool {
+        named_nondet("mpsc::Sender::is_closed")
     }
 }
 
@@ -56,20 +59,47 @@ impl<T: Message + Clone + 'static> Receiver<T> {
 
     // This is incomplete as it does not model receive errors.
     // A complete implementation would non-deterministically return None.
-    pub fn recv(&self) -> Option<T> {
+    pub async fn recv(&self) -> Option<T> {
         info!("This is an incomplete implementation. It never returns None");
-        Some(self.receiver.recv_msg_block())
+        // Some(self.receiver.recv_msg_block())
+        // println!("reaching a recv");
+        Some(self.receiver.async_recv_msg().await)
     }
 
     // This is incomplete as it does not model receive errors.
     // A complete implementation would non-deterministically return an error.
     pub fn try_recv(&self) -> Result<T, error::TryRecvError> {
-        info!("This is an incomplete implementation. It never returns errors");
-        Ok(self.receiver.recv_msg_block())
+        // info!("This is an incomplete implementation. It never returns errors");
+        // //Ok(self.receiver.recv_msg_block())
+        // Ok(self.receiver.recv_msg_block())
+        info!(
+            "This is an incomplete implementation. It returns Empty only when 
+            sending some special message containing the string mpscClose"
+        );
+        let msg = self.receiver.recv_msg_block();
+        if format!("{:?}", msg).contains("mpscClose") {
+            Err(error::TryRecvError::Empty)
+        } else {
+            Ok(msg)
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        named_nondet("mpsc::Receiver::is_empty")
+    }
+
+    pub fn len(&self) -> usize {
+        named_nondet("mpsc::Receiver::len") as usize
+    }
+
+    pub fn close(&mut self) {}
+
+    pub fn is_closed(&self) -> bool {
+        named_nondet("mpsc::Receiver::is_closed")
     }
 
     pub fn poll_recv(&mut self, _cx: &mut Context<'_>) -> Poll<Option<T>> {
-        Poll::Ready(self.recv())
+        Poll::Ready(Some(self.receiver.recv_msg_block()))
     }
 }
 
@@ -105,7 +135,7 @@ impl<T: Message + 'static> UnboundedSender<T> {
     }
 
     pub fn is_closed(&self) -> bool {
-        nondet()
+        named_nondet("mpsc::UnboundedSender::is_closed")
     }
 }
 
@@ -137,17 +167,17 @@ impl<T: Message + Clone + 'static> UnboundedReceiver<T> {
     }
 
     pub fn is_empty(&self) -> bool {
-        nondet()
+        named_nondet("mpsc::UnboundedReceiver::is_empty")
     }
 
     pub fn len(&self) -> usize {
-        nondet() as usize
+        named_nondet("mpsc::UnboundedReceiver::len") as usize
     }
 
     pub fn close(&mut self) {}
 
     pub fn is_closed(&self) -> bool {
-        nondet()
+        named_nondet("mpsc::UnboundedReceiver::is_closed")
     }
 }
 
