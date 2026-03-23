@@ -75,7 +75,7 @@ unsafe impl<T> Sync for OwnedRwLockWriteGuard<T> where T: ?Sized + Send + Sync {
 unsafe impl<T> Send for RwLockWriteGuard<'_, T> where T: ?Sized + Send + Sync {}
 unsafe impl<T> Send for OwnedRwLockWriteGuard<T> where T: ?Sized + Send + Sync {}
 
-impl<T: ?Sized> RwLock<T>
+impl<T> RwLock<T>
 where
     T: Sized,
 {

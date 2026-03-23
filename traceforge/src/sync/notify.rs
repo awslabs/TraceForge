@@ -21,10 +21,10 @@ pub struct Notified<'a> {
 
 impl Notify {
     pub fn new() -> Notify {
-        return Notify {
+        Notify {
             state: AtomicUsize::new(0),
             waiters: Arc::new(Mutex::new(Vec::new())),
-        };
+        }
     }
 
     pub const fn const_new() -> Notify {
@@ -40,7 +40,7 @@ impl Notify {
 
     pub fn notify_one(&self) {
         let mut waiters = self.waiters.blocking_lock();
-        if waiters.len() > 0 {
+        if !waiters.is_empty() {
             // there is a waiter, notify them by writing to their channel
             let ch = waiters.pop().unwrap();
             let _ = ch.send(true);

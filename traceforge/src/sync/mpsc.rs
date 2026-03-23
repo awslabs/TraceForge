@@ -68,8 +68,8 @@ impl<T: Message + Clone + 'static> Receiver<T> {
         Ok(self.receiver.recv_msg_block())
     }
 
-    pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
-        return Poll::Ready(self.recv());
+    pub fn poll_recv(&mut self, _cx: &mut Context<'_>) -> Poll<Option<T>> {
+        Poll::Ready(self.recv())
     }
 }
 

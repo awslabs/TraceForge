@@ -24,6 +24,7 @@ pub(crate) struct ThreadInfo {
 }
 
 impl ThreadInfo {
+    #[allow(dead_code)]
     pub(crate) fn name(&self) -> Option<&str> {
         self.tclab.name().as_deref()
     }
@@ -616,13 +617,13 @@ impl ExecutionGraph {
 
     /// Return the index of the receiving channel, if any
     pub(crate) fn get_receiving_index(&self, rlab: &RecvMsg) -> Option<usize> {
-        rlab.rf().and_then(|send| {
+        rlab.rf().map(|send| {
             let slab = self.send_label(send).unwrap();
             if rlab.monitors(slab) {
                 // Monitor receives should have a single (legacy) channel
-                Some(0)
+                0
             } else {
-                Some(rlab.recv_loc().get_matching_index(slab.send_loc()))
+                rlab.recv_loc().get_matching_index(slab.send_loc())
             }
         })
     }
@@ -957,7 +958,7 @@ impl ExecutionGraph {
             }
             _ => { /* Nothing more to do */ }
         };
-        return lab.cached_porf().contains(first);
+        lab.cached_porf().contains(first)
     }
 
     /// This function creates a linearization of an execution graph.
@@ -967,8 +968,8 @@ impl ExecutionGraph {
     /// This helps us obtain a minimal execution trace since there might be other
     /// nodes in the graph that are not relevant to the assertion violation.
     pub(crate) fn top_sort(&self, pos: Option<Event>) -> REPLAY::TopologicallySortedExecutionGraph {
-        let maxs = if pos.is_some() {
-            vec![pos.unwrap()]
+        let maxs = if let Some(ev) = pos {
+            vec![ev]
         } else {
             self.threads
                 .iter()

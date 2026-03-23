@@ -797,7 +797,7 @@ where
     recv_msg_block_with_tag(locs, comm, Some(PredicateType(Arc::new(f))))
 }
 
-/// Main API
+// Main API
 
 /// Sends to `t` the message `v`
 pub fn send_msg<T: Message + 'static>(t: ThreadId, v: T) {
@@ -985,18 +985,15 @@ fn recv_val_block_with_tag<'a>(
                 true,
             )
         });
-        match val {
-            Some(box_msg) => {
-                if box_msg.is_pending() {
-                    // The joined thread has not finished executing yet,
-                    // so the End label doesn't have the value returned by the thread.
-                    // Block this thread and let the other thread finish.
-                    ExecutionState::with(|s| s.current_mut().stuck());
-                } else {
-                    return (box_msg, ind.unwrap());
-                }
+        if let Some(box_msg) = val {
+            if box_msg.is_pending() {
+                // The joined thread has not finished executing yet,
+                // so the End label doesn't have the value returned by the thread.
+                // Block this thread and let the other thread finish.
+                ExecutionState::with(|s| s.current_mut().stuck());
+            } else {
+                return (box_msg, ind.unwrap());
             }
-            _ => {}
         };
 
         ExecutionState::with(|s| s.prev_pos());

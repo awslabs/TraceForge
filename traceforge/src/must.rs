@@ -424,7 +424,7 @@ impl Must {
             };
             // The reader might be stuck waiting us, inform caller
             // to handle appropriately (has access to ExecutionState).
-            slab.reader().map(|r| stuck.push(r));
+            if let Some(r) = slab.reader() { stuck.push(r) }
             // Similar for monitor readers
             slab.monitor_readers().iter().for_each(|&r| stuck.push(r));
             return stuck;
@@ -819,7 +819,7 @@ impl Must {
                     // . . It is unread and the location *really* matches (not via monitoring)
                         (send.can_be_read_from(loc) &&
                             // disregard cancelled sends
-                            !send.is_cancelled_wrt(&blab.as_event_label()))
+                            !send.is_cancelled_wrt(blab.as_event_label()))
                 })
             } else {
                 false
@@ -931,7 +931,7 @@ impl Must {
         );
 
         if self.config.progress_report > 0 {
-            if num_total % (self.config.progress_report as u64) == 0 {
+            if num_total.is_multiple_of(self.config.progress_report as u64) {
                 // Although it might be nice to use \r (carriage return) here to
                 // repeatedly rewrite the same line with new progress reports, this
                 // will eat up the last log line, and if the program is printing anything
@@ -965,7 +965,7 @@ impl Must {
             return false; // no progress report at 0.
         }
         let mut p = n;
-        while p % 10 == 0 {
+        while p.is_multiple_of(10) {
             p /= 10;
         }
         // If P has only one digit then after removing right zeros, it will be less than 10.
@@ -1141,8 +1141,7 @@ impl Must {
             // Note: slice[slice.len()..] is indeed valid and produces an empty slice
             if thread.labels[i..]
                 .iter()
-                .find(|&lab| !self.is_maximal(lab, rev))
-                .is_some()
+                .any(|lab| !self.is_maximal(lab, rev))
             {
                 return false;
             }
@@ -1711,8 +1710,8 @@ impl Must {
     fn print_graph_trace(&self, error: Option<Event>) -> std::io::Result<()> {
         let g = &self.current.graph;
 
-        let maxs = if error.is_some() {
-            vec![error.unwrap()]
+        let maxs = if let Some(e) = error {
+            vec![e]
         } else {
             g.thread_ids()
                 .iter()
@@ -1802,13 +1801,10 @@ impl Must {
             // Detect this, ensure it's waiting for the finished tid, and unblock it
             let tid = must.to_thread_id(task.id());
             let curr = Event::new(tid, task.instructions as u32);
-            match must.current.graph.label(curr.next()) {
-                LabelEnum::TJoin(jlab) => {
-                    if jlab.cid() == finished {
-                        task.unstuck();
-                    }
+            if let LabelEnum::TJoin(jlab) = must.current.graph.label(curr.next()) {
+                if jlab.cid() == finished {
+                    task.unstuck();
                 }
-                _ => {}
             }
         }
     }
@@ -1828,7 +1824,7 @@ fn pop_worklist(worklist: &mut RQueue, is_arbitrary: bool, rng: &mut Pcg64Mcg) -
             .iter_mut()
             .next_back()
             .expect("worklist is not empty");
-        if (!is_arbitrary) {
+        if !is_arbitrary  {
             let rev = revs.pop().unwrap();
             (*stamp, rev, revs.is_empty())
         }
