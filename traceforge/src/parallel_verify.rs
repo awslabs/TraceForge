@@ -155,7 +155,7 @@ fn explore_workers_revisit_queue_rayon<'scope, F>(
     );
     println!("RevisitQueueRayon per-worker stats:");
 
-    // Spawn batched rayon tasks for surplus items
+    // Spawn batched rayon tasks for surplus items (root starts alone, no overflow possible)
     spawn_batched_tasks(
         scope, items, &conf, &f, &metrics, &results, interval, batch_size,
     );
@@ -271,7 +271,6 @@ fn rayon_queue_task<'scope, F>(
         if must.borrow().current_rqueue_empty() {
             break;
         }
-        // Loop: try_revisit on current (still loaded)
     }
 
     // Record stats and return Must to thread-local cache for reuse
@@ -287,6 +286,7 @@ fn rayon_queue_task<'scope, F>(
 }
 
 /// Split work items into batches of `batch_size` and spawn a rayon task per batch.
+/// Consumes `items` by value to avoid cloning ExecutionGraphs.
 fn spawn_batched_tasks<'scope, F>(
     scope: &rayon::Scope<'scope>,
     items: Vec<QueueWorkItem>,
@@ -302,8 +302,9 @@ fn spawn_batched_tasks<'scope, F>(
     if items.is_empty() {
         return;
     }
-    for chunk in items.chunks(batch_size) {
-        let batch: Vec<QueueWorkItem> = chunk.to_vec();
+    let mut iter = items.into_iter().peekable();
+    while iter.peek().is_some() {
+        let batch: Vec<QueueWorkItem> = iter.by_ref().take(batch_size).collect();
         let conf = conf.clone();
         let f = f.clone();
         let results = results.clone();
@@ -335,7 +336,8 @@ where
 {
     must.borrow_mut().started_at = Instant::now();
     Must::set_current(Some(must.clone()));
-    CONTINUATION_POOL.set(&ContinuationPool::new(), || loop {
+    let pool = ContinuationPool::new();
+    CONTINUATION_POOL.set(&pool, || loop {
         let f = Arc::clone(f);
         let execution = Execution::new(Rc::clone(must));
         Must::begin_execution(must);
@@ -344,4 +346,7 @@ where
             break;
         }
     });
+    // Free mmap'd generator stacks before the pool drops.
+    // Safe here because we're not in TLS destruction.
+    pool.drain_and_free();
 }

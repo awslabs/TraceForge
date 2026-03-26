@@ -238,6 +238,29 @@ impl ContinuationPool {
     }
 }
 
+impl ContinuationPool {
+    /// Explicitly free all pooled continuations and their mmap'd stacks.
+    /// Must be called while NOT inside TLS destruction (i.e., during normal
+    /// execution) so that the generator crate's internal TLS is still alive.
+    /// This is needed in the parallel path where pools are created/destroyed
+    /// repeatedly — without this, ManuallyDrop prevents generator stacks
+    /// from being freed, leaking mmap regions until vm.max_map_count is hit.
+    pub fn drain_and_free(&self) {
+        let mut conts = self.continuations.borrow_mut();
+        for mut c in conts.drain(..) {
+            if c.reusable() {
+                let ret = c.resume_with_input(ContinuationInput::Exit);
+                debug_assert_eq!(ret, ContinuationOutput::Exited);
+            }
+            // SAFETY: generator is ManuallyDrop so won't auto-free.
+            // We must drop it explicitly to munmap its stack.
+            unsafe { ManuallyDrop::drop(&mut c.generator); }
+            // Prevent Continuation::drop from double-using the generator.
+            c.state = ContinuationState::Running;
+        }
+    }
+}
+
 impl Drop for ContinuationPool {
     fn drop(&mut self) {
         // It's not safe to run Continuation's drop handler while dropping ContinuationPool,
