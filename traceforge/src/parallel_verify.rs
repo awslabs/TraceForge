@@ -324,6 +324,17 @@ fn rayon_queue_task<'scope, F>(
         let saved = must.borrow_mut().drain_saved_states();
         let surplus_items = filter_nonempty_work_items(saved);
 
+        if !surplus_items.is_empty() {
+            let total_revisits: usize = surplus_items
+                .iter()
+                .map(|(_, rq)| rq.values().map(|v| v.len()).sum::<usize>())
+                .sum();
+            println!(
+                "  rt{}: split {} items ({} revisits), batch_size={}",
+                task_id, surplus_items.len(), total_revisits, batch_size,
+            );
+        }
+
         spawn_batched_tasks(
             scope, surplus_items, conf, f, metrics, results, interval, batch_size,
         );
