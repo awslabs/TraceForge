@@ -315,7 +315,6 @@ impl ExecutionGraph {
             }
         }
 
-        // Return a new thread that is one larger than existing.
         let opaque_id = self
             .threads
             .iter()

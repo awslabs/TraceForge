@@ -124,11 +124,13 @@ pub(crate) struct Must {
 
     // Named nondeterministic choice support
     // Per-choice-name thread indexing: each choice name has independent thread indices
-    // Frozen mapping from first execution, used to ensure consistent thread indices across all executions
-    pub(crate) frozen_thread_index_map: Option<HashMap<String, HashMap<ThreadId, usize>>>,
+    // Frozen mapping used to ensure consistent thread indices across all executions.
+    // Keys are origination_vecs (spawn lineage paths) which are stable across executions,
+    // unlike ThreadIds which can change when scheduling decisions differ.
+    pub(crate) frozen_thread_index_map: Option<HashMap<String, HashMap<Vec<u32>, usize>>>,
     // Current execution's mapping (built during first execution, then copied from frozen)
-    // Map: choice_name -> (ThreadId -> thread_idx)
-    pub(crate) thread_index_map: HashMap<String, HashMap<ThreadId, usize>>,
+    // Map: choice_name -> (origination_vec -> thread_idx)
+    pub(crate) thread_index_map: HashMap<String, HashMap<Vec<u32>, usize>>,
     // Next available index for each choice name
     pub(crate) next_thread_index: HashMap<String, usize>,
     // Per-execution counters: (choice_name, thread_idx) -> occurrence count
@@ -302,6 +304,61 @@ impl Must {
         self.current.graph = eg;
     }
 
+    /// Cheaply reset a Must instance for reuse by a new parallel task.
+    /// Clears accumulated state (counters, states, monitors, telemetry)
+    /// so stats start fresh for this task.
+    pub(crate) fn reset_for_reuse(&mut self) {
+        self.states.clear();
+        self.current = MustState::new();
+        self.monitors.clear();
+        self.stop = false;
+        self.published_values.clear();
+        self.started_at = Instant::now();
+        self.choice_occurrence_counters.clear();
+        // Reset telemetry so stats() starts from zero for this task.
+        self.telemetry = Telemetry::new(self.config.keep_per_execution_coverage);
+        let _ = self.telemetry.register_counter(&EXECS.to_owned());
+        let _ = self.telemetry.register_counter(&BLOCKED.to_owned());
+        let _ = self.telemetry.register_histogram(&EXECS_EST.to_owned());
+        // Note: frozen_thread_index_map, thread_index_map, next_thread_index,
+        // config, rng are intentionally NOT reset — they are either set
+        // explicitly by the caller (frozen map) or persist across tasks.
+    }
+
+    /// Drain only the saved states (not current). Returns them as work items.
+    /// Current state remains in place, untouched.
+    pub(crate) fn drain_saved_states(&mut self) -> Vec<(ExecutionGraph, RQueue)> {
+        self.states
+            .drain(..)
+            .map(|state| (state.graph, state.rqueue))
+            .collect()
+    }
+
+    /// Check if the current state's revisit queue is empty.
+    pub(crate) fn current_rqueue_empty(&self) -> bool {
+        self.current.rqueue.is_empty()
+    }
+
+    /// Load a state stack with partitioned queues (for parallel workers).
+    /// Each state gets its graph and a partitioned subset of its revisits.
+    pub(crate) fn load_state_stack(&mut self, mut stack: Vec<(ExecutionGraph, RQueue)>) {
+        self.states.clear();
+
+        if stack.is_empty() {
+            return;
+        }
+
+        // Pop the last entry — it becomes current
+        let (last_graph, last_rqueue) = stack.pop().unwrap();
+        self.current.graph = last_graph;
+        self.current.rqueue = last_rqueue;
+
+        // Remaining entries become saved states (moved, not cloned)
+        for (graph, rqueue) in stack {
+            self.states.push(MustState { graph, rqueue });
+        }
+    }
+
     /// Add the replay information to a fresh instance of Must
     pub(crate) fn load_replay_information(&mut self, replay_info: REPLAY::ReplayInformation) {
         self.replay_info = replay_info;
@@ -470,6 +527,11 @@ impl Must {
         let mut origination_vec = parent_tclab.origination_vec();
         origination_vec.push(pos.index);
         self.current.graph.tid_for_spawn(pos, &origination_vec)
+    }
+
+    /// Returns the origination_vec for the given thread.
+    pub(crate) fn thread_origination_vec(&self, tid: ThreadId) -> Vec<u32> {
+        self.current.graph.get_thread_tclab(tid).origination_vec()
     }
 
     pub(crate) fn handle_tcreate(

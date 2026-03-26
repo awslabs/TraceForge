@@ -11,7 +11,11 @@ use crate::channel::{from_receiver, Builder, Receiver, Sender};
 use crate::loc::WakeMsg;
 use crate::msg::Message;
 use crate::runtime::execution::ExecutionState;
-use crate::runtime::task::TaskId;
+use crate::runtime::task::{TaskId};
+use crate::thread::{ThreadId};
+
+
+
 use crate::runtime::thread::{self, switch};
 use crate::thread::Thread;
 use crate::CommunicationModel::LocalOrder;
@@ -207,7 +211,88 @@ where
     let recv = recv.clone();
     let task_id = ExecutionState::spawn_thread(
         move || {
+            //let mut val = crate::Val::new(());
             let mut join_waker: Option<Waker> = None;
+            //let mut msg = None;
+
+            // Newer version
+            // let message = recv.recv_msg();
+            // loop {
+            //     let poller_message = fut_handles.receiver.recv_msg_block();
+            //     match poller_message {
+            //         PollerMsg::Waker(_) => {
+            //             if message.is_some() {
+            //                 fut_handles.sender.send_msg(PollerMsg::Ready);
+            //                 val = crate::Val::new(message.unwrap());
+            //                 break;
+            //             }
+            //             else {
+            //                 fut_handles.sender.send_msg(PollerMsg::Pending);
+            //             }
+            //         },
+            //         PollerMsg::Cancel => {
+            //             if message.is_some() {
+            //                 crate::assume!(false);
+            //             }
+            //             else {
+            //                 break;
+            //             }
+            //         },
+            //         _ => unreachable!(),
+            //         };
+            // }
+
+            // // New version
+            // let message1 = fut_handles.receiver.recv_msg_block();
+            // if let PollerMsg::Waker(waker) = message1 {
+            //     // Save the waker and inform them it's Pending
+            //     join_waker = Some(waker.clone());
+            //     fut_handles.sender.send_msg(PollerMsg::Pending);
+
+            //     let (message2, ind) = crate::select_val_block(&fut_handles.receiver, &recv);
+            //     // TODO: Use `cast!` to avoid all the `unreachable!` mess.
+            //     if ind == 0 {
+            //         // We receive Waker and send Pending, or Cancel; nothing to do afterwards
+            //         match message2.as_any().downcast::<PollerMsg>() {
+            //             Ok(msg) => {
+            //                 match *msg {
+            //                     PollerMsg::Waker(_) => {
+            //                         fut_handles.sender.send_msg(PollerMsg::Pending);
+            //                     },
+            //                     _ => {},
+            //                 }
+            //             }
+            //             _ => unreachable!(),
+            //         }
+            //     } else {
+            //         // We did the receive, call the waker.
+            //         match message2.as_any().downcast::<T>() {
+            //             Ok(result) => {
+            //                 if let Some(waker) = join_waker {
+            //                     waker.wake();
+            //                 }
+            //                 // We consumed the message
+            //                 msg = Some(*result);
+            //             }
+            //             _ => unreachable!(),
+            //         }
+
+            //         // At this point we can either receive Waker or Cancel
+            //         let message3 = fut_handles.receiver.recv_msg_block();
+            //         match message3 {
+            //             PollerMsg::Waker(_) => {
+            //                 fut_handles.sender.send_msg(PollerMsg::Ready);
+            //                 val = crate::Val::new(msg.unwrap());
+            //             },
+            //             PollerMsg::Cancel => {
+            //                 from_receiver(recv).send_msg(msg.unwrap());
+            //             },
+            //             _ => unreachable!(),
+            //         };
+            //     }
+            // }
+
+            // Old version
             let res = loop {
                 // Wait for either the joiner to poll us, or the receive to succeed.
                 let (msg, ind) = crate::select_val_block(&fut_handles.receiver, &recv);
@@ -296,7 +381,7 @@ where
             None, /* asyncs do not have symmetric versions for symm reduction */
             pos,
             Some(name.clone()),
-            false, /* asyncs are not daemon threads */
+            true, /* async receives are daemon threads */
         );
         (tid, Some(name))
     });

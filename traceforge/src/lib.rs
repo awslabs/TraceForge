@@ -3,6 +3,8 @@ pub mod channel;
 mod cons;
 pub mod coverage;
 pub use coverage::{CoverageInfo, ExecutionId};
+pub mod parallel_verify;
+pub use parallel_verify::verify_partitioned_rayon;
 
 mod event;
 mod event_label;
@@ -97,6 +99,23 @@ pub enum SchedulePolicy {
     LTR,
     /// arbitrary
     Arbitrary,
+}
+
+/// Branching strategy for parallel verification.
+///
+/// Controls how work is partitioned when spawning parallel exploration tasks.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum BranchingStrategy {
+    /// Uses rayon's built-in work-stealing instead of a manual shared queue.
+    /// Surplus work items are spawned as rayon tasks via `scope.spawn()`.
+    /// Each rayon thread reuses a thread-local Must instance.
+    RevisitQueueRayon,
+}
+
+impl Default for BranchingStrategy {
+    fn default() -> Self {
+        BranchingStrategy::RevisitQueueRayon
+    }
 }
 
 /// Available TraceForge modes. These are not set directly
@@ -203,6 +222,12 @@ pub struct Config {
     pub(crate) turmoil_trace_file: Option<String>,
     pub(crate) parallel: bool,
     pub(crate) parallel_workers: Option<usize>,
+    pub(crate) partitioned_parallelization: bool,
+    pub(crate) partitioned_num_threads: Option<usize>,
+    pub(crate) partitioned_branching: BranchingStrategy,
+    pub(crate) partitioned_warmup: usize,
+    pub(crate) revisit_eager_interval: usize,
+    pub(crate) revisit_queue_batch_size: usize,
     pub(crate) keep_per_execution_coverage: bool,
     pub(crate) predetermined_choices: HashMap<String, Vec<Vec<bool>>>,    
     #[serde(skip)]
@@ -265,6 +290,12 @@ impl ConfigBuilder {
             turmoil_trace_file: None,
             parallel: false,
             parallel_workers: None,
+            partitioned_parallelization: false,
+            partitioned_num_threads: None,
+            partitioned_branching: BranchingStrategy::default(),
+            partitioned_warmup: 100,
+            revisit_eager_interval: 50,
+            revisit_queue_batch_size: 1,
             keep_per_execution_coverage: false,
 	        predetermined_choices: HashMap::new(),
             callbacks: Arc::new(Mutex::new(Vec::new())),
@@ -280,9 +311,12 @@ impl ConfigBuilder {
         if self.0.symmetry && self.0.schedule_policy == SchedulePolicy::Arbitrary {
             eprintln!("Symmetry reduction can only be used with LTR!");
             std::process::exit(exitcode::CONFIG);
-        } else {
-            self
         }
+        if self.0.parallel && self.0.partitioned_parallelization {
+            eprintln!("Cannot use both parallel and partitioned_parallelization modes!");
+            std::process::exit(exitcode::CONFIG);
+        }
+        self
     }
 
     /// Determines TraceForge's running mode:
@@ -445,6 +479,55 @@ impl ConfigBuilder {
         self
     }
 
+    /// Enables partitioned parallelization using Rayon work-stealing.
+    /// This is a different parallel strategy than .with_parallel() which uses a shared queue.
+    /// Cannot be used together with .with_parallel(true).
+    pub fn with_partitioned_parallelization(mut self, enabled: bool) -> Self {
+        self.0.partitioned_parallelization = enabled;
+        self
+    }
+
+    /// Sets the number of threads for partitioned parallelization.
+    /// None (default) uses the number of logical CPUs.
+    /// Requires .with_partitioned_parallelization(true).
+    pub fn with_partitioned_num_threads(mut self, num_threads: usize) -> Self {
+        self.0.partitioned_num_threads = Some(num_threads);
+        self
+    }
+
+    /// Sets the branching strategy for partitioned parallelization.
+    /// Default is BranchingStrategy::RevisitQueueRayon.
+    /// Requires .with_partitioned_parallelization(true).
+    pub fn with_partitioned_branching(mut self, branching: BranchingStrategy) -> Self {
+        self.0.partitioned_branching = branching;
+        self
+    }
+
+    /// Sets the warmup threshold for partitioned parallelization.
+    /// This is the number of executions to run before partitioning work.
+    /// Default is 100. Requires .with_partitioned_parallelization(true).
+    pub fn with_partitioned_warmup(mut self, warmup: usize) -> Self {
+        self.0.partitioned_warmup = warmup;
+        self
+    }
+
+    /// Sets the interval (in executions) between revisit-queue inspections for
+    /// the `RevisitQueueRayon` strategy. Default is 50.
+    pub fn with_revisit_eager_interval(mut self, interval: usize) -> Self {
+        assert!(interval > 0, "revisit_eager_interval must be > 0");
+        self.0.revisit_eager_interval = interval;
+        self
+    }
+
+    /// Number of (graph, rqueue) pairs per spawned task in `RevisitQueueRayon`.
+    /// Default is 1. Higher values mean coarser tasks (less spawning overhead,
+    /// but coarser load balancing).
+    pub fn with_revisit_queue_batch_size(mut self, batch_size: usize) -> Self {
+        assert!(batch_size > 0, "revisit_queue_batch_size must be > 0");
+        self.0.revisit_queue_batch_size = batch_size;
+        self
+    }
+
     /// Registers a callback that is called at the end of an execution by the model checker
     ///
     pub fn with_callback(self, cb: Box<dyn ExecutionObserver + Send>) -> Self {
@@ -503,8 +586,14 @@ pub fn verify<F>(conf: Config, f: F) -> Stats
 where
     F: Fn() + Send + Sync + 'static,
 {
+    if conf.parallel && conf.partitioned_parallelization {
+        panic!("Cannot use both .with_parallel(true) and .with_partitioned_parallelization(true)");
+    }
+
     let f = Arc::new(f);
-    if conf.parallel {
+    if conf.partitioned_parallelization {
+        parallel_verify::verify_partitioned_rayon(conf, move || f())
+    } else if conf.parallel {
         ExecutionPool::new(&conf).explore(&f)
     } else {
         let must = Rc::new(RefCell::new(Must::new(conf, false)));
@@ -1059,15 +1148,19 @@ pub fn named_nondet(name: &str) -> bool {
     switch();
     ExecutionState::with(|s| {
         let pos = s.next_pos();
-        let thread_id = pos.thread;
 
         let mut must = s.must.borrow_mut();
 
+        // Use the thread's origination_vec as the map key instead of ThreadId.
+        // origination_vecs are stable across executions (they encode the spawn lineage path),
+        // whereas ThreadIds can change when scheduling decisions differ.
+        let origination_vec = must.thread_origination_vec(pos.thread);
+
         // Get thread index for this choice name with incremental freezing
         // Each choice name has independent thread indexing
-        // Once a (choice_name, thread_id) pair is assigned an index, it's frozen for the entire exploration
+        // Once a (choice_name, origination_vec) pair is assigned an index, it's frozen for the entire exploration
         let thread_idx = if let Some(name_map) = must.thread_index_map.get(name) {
-            if let Some(&idx) = name_map.get(&thread_id) {
+            if let Some(&idx) = name_map.get(&origination_vec) {
                 // Already assigned (and frozen)
                 idx
             } else {
@@ -1079,17 +1172,17 @@ pub fn named_nondet(name: &str) -> bool {
                 must.thread_index_map
                     .entry(name.to_string())
                     .or_insert_with(HashMap::new)
-                    .insert(thread_id, idx);
+                    .insert(origination_vec.clone(), idx);
 
                 // Immediately freeze this assignment for the rest of the exploration
                 if let Some(ref mut frozen) = must.frozen_thread_index_map {
                     frozen
                         .entry(name.to_string())
                         .or_insert_with(HashMap::new)
-                        .insert(thread_id, idx);
+                        .insert(origination_vec.clone(), idx);
                     debug!(
-                        "Assigned and froze thread index {} to ThreadId {:?} for choice '{}'",
-                        idx, thread_id, name
+                        "Assigned and froze thread index {} to origination_vec {:?} for choice '{}'",
+                        idx, origination_vec, name
                     );
                 }
 
@@ -1102,17 +1195,17 @@ pub fn named_nondet(name: &str) -> bool {
 
             // Add to current execution mapping
             let mut name_map = HashMap::new();
-            name_map.insert(thread_id, idx);
+            name_map.insert(origination_vec.clone(), idx);
             must.thread_index_map.insert(name.to_string(), name_map);
 
             // Immediately freeze this assignment for the rest of the exploration
             if let Some(ref mut frozen) = must.frozen_thread_index_map {
                 let mut frozen_name_map = HashMap::new();
-                frozen_name_map.insert(thread_id, idx);
+                frozen_name_map.insert(origination_vec.clone(), idx);
                 frozen.insert(name.to_string(), frozen_name_map);
                 debug!(
-                    "Assigned and froze thread index {} to ThreadId {:?} for choice '{}'",
-                    idx, thread_id, name
+                    "Assigned and froze thread index {} to origination_vec {:?} for choice '{}'",
+                    idx, origination_vec, name
                 );
             }
 
