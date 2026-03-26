@@ -1024,13 +1024,17 @@ impl Must {
 
     pub(crate) fn should_report(n: u64) -> bool {
         if n == 0 {
-            return false; // no progress report at 0.
+            return false;
         }
+        // Cap at every 1M once we reach that scale
+        if n >= 1_000_000 {
+            return n.is_multiple_of(1_000_000);
+        }
+        // Below that, use P-style: report at 1,2,..,9, 10,20,..,90, 100,200,..,900, etc.
         let mut p = n;
         while p.is_multiple_of(10) {
             p /= 10;
         }
-        // If P has only one digit then after removing right zeros, it will be less than 10.
         p < 10
     }
 
