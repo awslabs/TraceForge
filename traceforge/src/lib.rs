@@ -225,9 +225,8 @@ pub struct Config {
     pub(crate) partitioned_parallelization: bool,
     pub(crate) partitioned_num_threads: Option<usize>,
     pub(crate) partitioned_branching: BranchingStrategy,
-    pub(crate) partitioned_warmup: usize,
-    pub(crate) revisit_eager_interval: usize,
-    pub(crate) revisit_queue_batch_size: usize,
+    pub(crate) iterations_until_split: usize,
+    pub(crate) state_batch_size: usize,
     pub(crate) keep_per_execution_coverage: bool,
     pub(crate) predetermined_choices: HashMap<String, Vec<Vec<bool>>>,    
     #[serde(skip)]
@@ -293,9 +292,8 @@ impl ConfigBuilder {
             partitioned_parallelization: false,
             partitioned_num_threads: None,
             partitioned_branching: BranchingStrategy::default(),
-            partitioned_warmup: 100,
-            revisit_eager_interval: 50,
-            revisit_queue_batch_size: 1,
+            iterations_until_split: 100,
+            state_batch_size: 1,
             keep_per_execution_coverage: false,
 	        predetermined_choices: HashMap::new(),
             callbacks: Arc::new(Mutex::new(Vec::new())),
@@ -503,28 +501,20 @@ impl ConfigBuilder {
         self
     }
 
-    /// Sets the warmup threshold for partitioned parallelization.
-    /// This is the number of executions to run before partitioning work.
-    /// Default is 100. Requires .with_partitioned_parallelization(true).
-    pub fn with_partitioned_warmup(mut self, warmup: usize) -> Self {
-        self.0.partitioned_warmup = warmup;
-        self
-    }
-
-    /// Sets the interval (in executions) between revisit-queue inspections for
-    /// the `RevisitQueueRayon` strategy. Default is 50.
-    pub fn with_revisit_eager_interval(mut self, interval: usize) -> Self {
-        assert!(interval > 0, "revisit_eager_interval must be > 0");
-        self.0.revisit_eager_interval = interval;
+    /// Sets the number of executions each worker explores before splitting
+    /// its saved states into new rayon tasks. Default is 100.
+    pub fn with_iterations_until_split(mut self, n: usize) -> Self {
+        assert!(n > 0, "iterations_until_split must be > 0");
+        self.0.iterations_until_split = n;
         self
     }
 
     /// Number of (graph, rqueue) pairs per spawned task in `RevisitQueueRayon`.
     /// Default is 1. Higher values mean coarser tasks (less spawning overhead,
     /// but coarser load balancing).
-    pub fn with_revisit_queue_batch_size(mut self, batch_size: usize) -> Self {
-        assert!(batch_size > 0, "revisit_queue_batch_size must be > 0");
-        self.0.revisit_queue_batch_size = batch_size;
+    pub fn with_state_batch_size(mut self, batch_size: usize) -> Self {
+        assert!(batch_size > 0, "state_batch_size must be > 0");
+        self.0.state_batch_size = batch_size;
         self
     }
 

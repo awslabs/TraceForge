@@ -70,8 +70,7 @@ fn parallel_revisit_queue_rayon_named_nondet_two_threads_both_predetermined() {
                 .with_predetermined_choices(choices.clone())
                 .with_partitioned_parallelization(true)
                 .with_partitioned_branching(BranchingStrategy::RevisitQueueRayon)
-                .with_revisit_eager_interval(5)
-                .with_partitioned_warmup(2)
+                .with_iterations_until_split(5)
                 .build(),
             || program(),
         );
@@ -106,9 +105,8 @@ fn parallel_revisit_queue_rayon_batched_named_nondet_two_threads_both_predetermi
                 .with_predetermined_choices(choices.clone())
                 .with_partitioned_parallelization(true)
                 .with_partitioned_branching(BranchingStrategy::RevisitQueueRayon)
-                .with_revisit_eager_interval(5)
-                .with_revisit_queue_batch_size(3)
-                .with_partitioned_warmup(2)
+                .with_iterations_until_split(5)
+                .with_state_batch_size(3)
                 .build(),
             || program(),
         );
