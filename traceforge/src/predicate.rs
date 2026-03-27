@@ -10,7 +10,7 @@ use std::sync::Arc;
 /// A separate type helps in serialization as it isolates all
 /// the code relevant to serializing/deserializing tag predicates.
 #[derive(Clone)]
-pub(crate) struct PredicateType(pub Arc<dyn Send + Sync + Fn(ThreadId, Option<u32>) -> bool>);
+pub(crate) struct PredicateType(pub Arc<dyn Send + Sync + Fn(ThreadId, Option<Vec<u32>>) -> bool>);
 
 impl Serialize for PredicateType {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -54,5 +54,12 @@ impl<'de> Deserialize<'de> for PredicateType {
             Ok(_u) => Ok(PredicateType(Arc::new(|_, _| true))),
             Err(e) => Err(e),
         }
+    }
+}
+
+pub(crate) fn normalize_vec_tag(tag: Option<Vec<u32>>) -> Option<Vec<u32>> {
+    match tag {
+        Some(tag) if tag.is_empty() => None,
+        other => other,
     }
 }
