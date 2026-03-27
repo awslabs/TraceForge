@@ -1186,7 +1186,7 @@ pub fn named_nondet(name: &str) -> bool {
                     );
                 }
 
-                eprintln!(
+                println!(
                     "[named_nondet] Index assignment for choice '{}': \
                      thread_idx={}, origination_vec={:?}, thread={}\n\
                      Graph:\n{}",
