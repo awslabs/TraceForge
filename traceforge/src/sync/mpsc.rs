@@ -132,7 +132,8 @@ impl<T: Message + 'static> UnboundedSender<T> {
     }
 
     pub fn is_closed(&self) -> bool {
-        named_nondet("mpsc::UnboundedSender::is_closed")
+        // named_nondet("mpsc::UnboundedSender::is_closed")
+        false
     }
 }
 

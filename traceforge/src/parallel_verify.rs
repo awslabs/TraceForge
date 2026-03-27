@@ -68,9 +68,10 @@ where
     println!(
         "\n=== RAYON PARALLEL EXPLORATION ===\n\
          Pool size: {}, Branching: {:?}, \
-         RevisitEagerInterval: {}, BatchSize: {}",
+         Warmup: {}, IterationsUntilSplit: {}, BatchSize: {}",
         actual_pool_size,
         conf.partitioned_branching,
+        conf.warmup,
         conf.iterations_until_split,
         conf.state_batch_size,
     );
@@ -153,6 +154,7 @@ fn explore_workers_revisit_queue_rayon<'scope, F>(
 ) where
     F: Fn() + Send + Sync + 'static,
 {
+    let warmup = conf.warmup;
     let interval = conf.iterations_until_split;
     let batch_size = conf.state_batch_size;
     let conf = Arc::new(conf);
@@ -166,15 +168,39 @@ fn explore_workers_revisit_queue_rayon<'scope, F>(
     let must = Rc::new(RefCell::new(Must::new((*conf).clone(), false)));
     Must::set_current(Some(must.clone()));
 
-    // Run the first `interval` executions. This populates the execution graph
+    // Run the warmup executions. This populates the execution graph
     // and generates backward revisits (saved states) that become work items.
     let root_pool = ContinuationPool::new();
-    must.borrow_mut().config.max_iterations = Some(interval as u64);
+    must.borrow_mut().config.max_iterations = Some(warmup as u64);
     explore_with_pool(&must, &f, &root_pool);
 
     // Freeze the thread index mapping so all tasks use consistent indices.
     // This must happen after the first exploration which builds the mapping.
     *metrics.frozen_map.lock().unwrap() = must.borrow().frozen_thread_index_map.clone();
+
+    // Warn if predetermined choices have entries that were not assigned to any thread
+    // during warmup. This means the warmup didn't discover all expected threads.
+    {
+        let must_ref = must.borrow();
+        let frozen = must_ref.frozen_thread_index_map.as_ref();
+        for (name, thread_choices) in &must_ref.config.predetermined_choices {
+            let assigned_count = frozen
+                .and_then(|fm| fm.get(name))
+                .map(|m| m.len())
+                .unwrap_or(0);
+            if thread_choices.len() > assigned_count {
+                println!(
+                    "WARNING: Choice '{}' has {} predetermined thread entries \
+                     but only {} threads were assigned during warmup. \
+                     {} entries will have no effect.",
+                    name,
+                    thread_choices.len(),
+                    assigned_count,
+                    thread_choices.len() - assigned_count,
+                );
+            }
+        }
+    }
 
     // --- Phase 2: Distribute initial work items ---
 

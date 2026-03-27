@@ -225,6 +225,7 @@ pub struct Config {
     pub(crate) partitioned_parallelization: bool,
     pub(crate) partitioned_num_threads: Option<usize>,
     pub(crate) partitioned_branching: BranchingStrategy,
+    pub(crate) warmup: usize,
     pub(crate) iterations_until_split: usize,
     pub(crate) state_batch_size: usize,
     pub(crate) keep_per_execution_coverage: bool,
@@ -292,6 +293,7 @@ impl ConfigBuilder {
             partitioned_parallelization: false,
             partitioned_num_threads: None,
             partitioned_branching: BranchingStrategy::default(),
+            warmup: 100,
             iterations_until_split: 100,
             state_batch_size: 1,
             keep_per_execution_coverage: false,
@@ -498,6 +500,14 @@ impl ConfigBuilder {
     /// Requires .with_partitioned_parallelization(true).
     pub fn with_partitioned_branching(mut self, branching: BranchingStrategy) -> Self {
         self.0.partitioned_branching = branching;
+        self
+    }
+
+    /// Sets the number of executions the root worker runs in its initial
+    /// exploration before the first split into parallel tasks. Default is 100.
+    pub fn with_warmup(mut self, n: usize) -> Self {
+        assert!(n > 0, "warmup must be > 0");
+        self.0.warmup = n;
         self
     }
 
@@ -1176,6 +1186,13 @@ pub fn named_nondet(name: &str) -> bool {
                     );
                 }
 
+                eprintln!(
+                    "[named_nondet] New index assignment for choice '{}': \
+                     thread_idx={}, origination_vec={:?}, thread={}\n\
+                     Graph:\n{}",
+                    name, idx, origination_vec, pos.thread, must.print_graph(None)
+                );
+
                 idx
             }
         } else {
@@ -1198,6 +1215,13 @@ pub fn named_nondet(name: &str) -> bool {
                     idx, origination_vec, name
                 );
             }
+
+            eprintln!(
+                "[named_nondet] First index assignment for choice '{}': \
+                 thread_idx={}, origination_vec={:?}, thread={}\n\
+                 Graph:\n{}",
+                name, idx, origination_vec, pos.thread, must.print_graph(None)
+            );
 
             idx
         };
@@ -1233,6 +1257,34 @@ pub fn named_nondet(name: &str) -> bool {
             "Using nondeterministic exploration for choice '{}' [thread_idx={}, occurrence={}]",
             name, thread_idx, current_occurrence
         );
+
+        // Assert: if predetermined choices exist for this choice name but there is
+        // no entry for this thread_idx, something is likely wrong. This can indicate
+        // origination_vec instability: the thread got a shifted origination_vec, was
+        // assigned a new index beyond the configured predetermined range.
+        if let Some(thread_choices) = must.config.predetermined_choices.get(name) {
+            if thread_choices.get(thread_idx).is_none() {
+                let frozen_map_str = must.frozen_thread_index_map
+                    .as_ref()
+                    .map(|fm| format!("{:#?}", fm))
+                    .unwrap_or_else(|| "None".to_string());
+                panic!(
+                    "[named_nondet] Choice '{}' has {} predetermined thread entries \
+                     but thread_idx={} has no entry (occurrence={}).\n\
+                     This may indicate origination_vec instability.\n\
+                     Thread: {}\n\
+                     Origination vec: {:?}\n\
+                     Frozen thread index map:\n{}\n\
+                     Graph:\n{}",
+                    name, thread_choices.len(), thread_idx, current_occurrence,
+                    pos.thread,
+                    origination_vec,
+                    frozen_map_str,
+                    must.print_graph(None)
+                );
+            }
+        }
+
         // Release the mutable borrow so gen_bool() and handle_ctoss() can each borrow independently.
         drop(must);
         let toss = s.must.borrow_mut().gen_bool();
