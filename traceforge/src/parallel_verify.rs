@@ -168,8 +168,9 @@ fn explore_workers_revisit_queue_rayon<'scope, F>(
 
     // Run the first `interval` executions. This populates the execution graph
     // and generates backward revisits (saved states) that become work items.
+    let root_pool = ContinuationPool::new();
     must.borrow_mut().config.max_iterations = Some(interval as u64);
-    explore(&must, &f);
+    explore_with_pool(&must, &f, &root_pool);
 
     // Freeze the thread index mapping so all tasks use consistent indices.
     // This must happen after the first exploration which builds the mapping.
@@ -217,7 +218,7 @@ fn explore_workers_revisit_queue_rayon<'scope, F>(
         };
         must.borrow_mut().config.max_iterations = Some(execs_so_far + interval as u64);
 
-        explore(&must, &f);
+        explore_with_pool(&must, &f, &root_pool);
 
         // After each interval, drain saved states and distribute as new tasks
         let saved = must.borrow_mut().drain_saved_states();
@@ -226,6 +227,9 @@ fn explore_workers_revisit_queue_rayon<'scope, F>(
             scope, surplus, &conf, &f, &metrics, &results, interval, batch_size,
         );
     }
+
+    // Free root pool stacks now that root is done exploring
+    root_pool.drain_and_free();
 
     // Record root worker stats
     let root_stats = must.borrow().stats();
@@ -250,6 +254,17 @@ fn explore_workers_revisit_queue_rayon<'scope, F>(
 // returned at the end, so it's never shared across concurrent tasks.
 thread_local! {
     static RAYON_CACHED_MUST: RefCell<Option<Rc<RefCell<Must>>>> = const { RefCell::new(None) };
+}
+
+// Thread-local cached ContinuationPool for rayon tasks.
+// Reusing the pool across explore() calls within a task (and across tasks
+// on the same thread) avoids repeated mmap/munmap syscalls for generator
+// stacks. On multi-core systems munmap triggers TLB shootdowns (IPIs to
+// all cores), which is especially expensive with many rayon workers.
+// The pool is only drain_and_free()'d when the rayon task finishes and
+// no subsequent task reuses it (i.e., at thread exit).
+thread_local! {
+    static RAYON_CACHED_POOL: RefCell<Option<ContinuationPool>> = const { RefCell::new(None) };
 }
 
 /// A single rayon task: the recursive building block of parallel exploration.
@@ -278,7 +293,7 @@ fn rayon_queue_task<'scope, F>(
 ) where
     F: Fn() + Send + Sync + 'static,
 {
-    // --- Setup: acquire and configure Must ---
+    // --- Setup: acquire and configure Must + ContinuationPool ---
 
     let must = RAYON_CACHED_MUST.with(|cached| {
         cached.borrow_mut().take().unwrap_or_else(|| {
@@ -288,6 +303,11 @@ fn rayon_queue_task<'scope, F>(
     // Clear accumulated state from previous task on this thread
     must.borrow_mut().reset_for_reuse();
     Must::set_current(Some(must.clone()));
+
+    // Reuse cached pool to avoid mmap/munmap overhead between explore() calls.
+    let cont_pool = RAYON_CACHED_POOL.with(|cached| {
+        cached.borrow_mut().take().unwrap_or_else(ContinuationPool::new)
+    });
 
     // Restore frozen thread index mapping so begin_execution uses
     // consistent indices for named_nondet across all workers.
@@ -316,7 +336,7 @@ fn rayon_queue_task<'scope, F>(
         };
         must.borrow_mut().config.max_iterations = Some(execs_so_far + interval as u64);
 
-        explore(&must, f);
+        explore_with_pool(&must, f, &cont_pool);
 
         // Drain saved states produced by backward revisits during this
         // interval. These are new branching points to explore. Distribute
@@ -346,7 +366,7 @@ fn rayon_queue_task<'scope, F>(
         }
     }
 
-    // --- Teardown: record stats and return Must to cache ---
+    // --- Teardown: record stats and return Must + pool to caches ---
 
     let worker_stats = must.borrow().stats();
     let total_execs = worker_stats.execs + worker_stats.block;
@@ -354,9 +374,11 @@ fn rayon_queue_task<'scope, F>(
         let label = format!("rt{}", task_id);
         results.lock().unwrap().push((label, worker_stats));
     }
-    // Return Must to thread-local cache for reuse by the next task on this thread.
     RAYON_CACHED_MUST.with(|cached| {
         *cached.borrow_mut() = Some(must);
+    });
+    RAYON_CACHED_POOL.with(|cached| {
+        *cached.borrow_mut() = Some(cont_pool);
     });
 }
 
@@ -408,25 +430,18 @@ fn filter_nonempty_work_items(
         .collect()
 }
 
-/// Run executions on the given Must instance until `max_iterations` is reached
-/// or all revisits are exhausted.
+/// Run executions using a caller-provided `ContinuationPool`.
 ///
-/// Creates a fresh `ContinuationPool` for green thread stacks. After the
-/// exploration loop, `drain_and_free()` explicitly munmaps all generator
-/// stacks. This is critical in the parallel path where `explore()` is called
-/// repeatedly — without it, `ManuallyDrop<Generator>` in `Continuation`
-/// prevents automatic cleanup, leaking mmap regions until the kernel's
-/// `vm.max_map_count` (default 65530) is exhausted and the process crashes.
-/// The sequential path doesn't need this because its pool persists for the
-/// entire verification run and stacks are recycled.
-fn explore<F>(must: &Rc<RefCell<Must>>, f: &Arc<F>)
+/// The pool is reused across calls to avoid mmap/munmap overhead for
+/// generator stacks. The caller is responsible for calling
+/// `pool.drain_and_free()` when the pool is no longer needed.
+fn explore_with_pool<F>(must: &Rc<RefCell<Must>>, f: &Arc<F>, pool: &ContinuationPool)
 where
     F: Fn() + Send + Sync + 'static,
 {
     must.borrow_mut().started_at = Instant::now();
     Must::set_current(Some(must.clone()));
-    let pool = ContinuationPool::new();
-    CONTINUATION_POOL.set(&pool, || loop {
+    CONTINUATION_POOL.set(pool, || loop {
         let f = Arc::clone(f);
         let execution = Execution::new(Rc::clone(must));
         Must::begin_execution(must);
@@ -435,8 +450,5 @@ where
             break;
         }
     });
-    // Explicitly free mmap'd generator stacks before the pool drops.
-    // Safe here because we are in normal execution, not TLS destruction.
-    // See ContinuationPool::drain_and_free() for the full rationale.
-    pool.drain_and_free();
 }
+
