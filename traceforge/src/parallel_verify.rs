@@ -119,6 +119,7 @@ where
         "Total executions: {} ({} complete, {} blocked)",
         total_execs, total_stats.execs, total_stats.block
     );
+    println!("Max complete graph events: {}", total_stats.max_complete_graph_events);
     println!("=============================================\n");
 
     total_stats
@@ -262,9 +263,10 @@ fn explore_workers_revisit_queue_rayon<'scope, F>(
     let root_execs = root_stats.execs + root_stats.block;
     if root_execs > 0 {
         println!(
-            "  root: {} execs, {:.1}s",
+            "  root: {} execs, {:.1}s, max_graph_events={}",
             root_execs,
             root_start.elapsed().as_secs_f64(),
+            root_stats.max_complete_graph_events,
         );
     }
     results
@@ -398,6 +400,10 @@ fn rayon_queue_task<'scope, F>(
     let total_execs = worker_stats.execs + worker_stats.block;
     if total_execs > 0 {
         let label = format!("rt{}", task_id);
+        println!(
+            "  {}: {} execs, max_graph_events={}",
+            label, total_execs, worker_stats.max_complete_graph_events,
+        );
         results.lock().unwrap().push((label, worker_stats));
     }
     RAYON_CACHED_MUST.with(|cached| {

@@ -135,6 +135,8 @@ pub(crate) struct Must {
     pub(crate) next_thread_index: HashMap<String, usize>,
     // Per-execution counters: (choice_name, thread_idx) -> occurrence count
     pub(crate) choice_occurrence_counters: HashMap<(String, usize), usize>,
+    // Maximum number of events across all complete (non-blocked) execution graphs
+    max_complete_graph_events: usize,
 }
 
 impl Must {
@@ -168,6 +170,7 @@ impl Must {
             thread_index_map: HashMap::new(),
             next_thread_index: HashMap::new(),
             choice_occurrence_counters: HashMap::new(),
+            max_complete_graph_events: 0,
         }
     }
 
@@ -315,6 +318,7 @@ impl Must {
         self.published_values.clear();
         self.started_at = Instant::now();
         self.choice_occurrence_counters.clear();
+        self.max_complete_graph_events = 0;
         // Reset telemetry so stats() starts from zero for this task.
         self.telemetry = Telemetry::new(self.config.keep_per_execution_coverage);
         let _ = self.telemetry.register_counter(&EXECS.to_owned());
@@ -972,6 +976,10 @@ impl Must {
             }
         } else if self.is_consistent() {
             self.telemetry.counter(EXECS.to_owned()); // increment EXECS
+            let event_count: usize = self.current.graph.threads.iter().map(|t| t.labels.len()).sum();
+            if event_count > self.max_complete_graph_events {
+                self.max_complete_graph_events = event_count;
+            }
             self.print_turmoil_trace();
             if self.config.verbose >= 1 {
                 println!("One more complete execution");
@@ -1633,6 +1641,7 @@ impl Must {
             execs: self.telemetry.read_counter(EXECS.into()).unwrap_or(0) as usize,
             block: self.telemetry.read_counter(BLOCKED.into()).unwrap_or(0) as usize,
             coverage: self.telemetry.coverage.export_aggregate().into(),
+            max_complete_graph_events: self.max_complete_graph_events,
         }
     }
 
