@@ -1191,8 +1191,8 @@ pub fn named_nondet(name: &str) -> bool {
                     );
                 }
 
-                eprintln!(
-                    "[named_nondet] New index assignment for choice '{}': \
+                println!(
+                    "[named_nondet] Index assignment for choice '{}': \
                      thread_idx={}, origination_vec={:?}, thread={}\n\
                      Graph:\n{}",
                     name, idx, origination_vec, pos.thread, must.print_graph(None)
@@ -1222,7 +1222,7 @@ pub fn named_nondet(name: &str) -> bool {
             }
 
             eprintln!(
-                "[named_nondet] First index assignment for choice '{}': \
+                "[named_nondet] Index assignment for choice '{}': \
                  thread_idx={}, origination_vec={:?}, thread={}\n\
                  Graph:\n{}",
                 name, idx, origination_vec, pos.thread, must.print_graph(None)
