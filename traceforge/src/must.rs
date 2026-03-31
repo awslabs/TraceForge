@@ -969,6 +969,10 @@ impl Must {
         if maybe_block.is_some() {
             if self.is_consistent() {
                 self.telemetry.counter(BLOCKED.to_owned()); // increment BLOCKED
+                let event_count: usize = self.current.graph.threads.iter().map(|t| t.labels.len()).sum();
+                if event_count > self.max_complete_graph_events {
+                    self.max_complete_graph_events = event_count;
+                }
                 if self.config.verbose >= 2 {
                     println!("One more blocked execution");
                     println!("{}", self.print_graph(None));
