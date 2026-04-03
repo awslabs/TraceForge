@@ -259,18 +259,18 @@ where
                                 PollerMsg::Waker(_) => {
                                     fut_handles.sender.send_msg(PollerMsg::Pending);
                                     // if we return Pending we may need to return Pending again
-                                    loop {
-                                        let message_n = fut_handles.receiver.recv_msg_block();
-                                        match message_n {
-                                            PollerMsg::Waker(_) => {
-                                                fut_handles.sender.send_msg(PollerMsg::Pending);
-                                            },
-                                            PollerMsg::Cancel => {
-                                                break;
-                                            },
-                                            _ => unreachable!(),
-                                        }
-                                    }
+                                    // loop {
+                                    //     let message_n = fut_handles.receiver.recv_msg_block();
+                                    //     match message_n {
+                                    //         PollerMsg::Waker(_) => {
+                                    //             fut_handles.sender.send_msg(PollerMsg::Pending);
+                                    //         },
+                                    //         PollerMsg::Cancel => {
+                                    //             break;
+                                    //         },
+                                    //         _ => unreachable!(),
+                                    //     }
+                                    // }
                                 },
                                 _ => {},
                             }
