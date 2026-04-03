@@ -541,6 +541,7 @@ pub(crate) struct TCreate {
     is_daemon: bool,
     sym_cid: Option<ThreadId>,
     origination_vec: Vec<u32>,
+    filtered_origination_vec: Vec<u32>,
 }
 
 impl TCreate {
@@ -551,6 +552,7 @@ impl TCreate {
         is_daemon: bool,
         sym_cid: Option<ThreadId>,
         origination_vec: Vec<u32>,
+        filtered_origination_vec: Vec<u32>,
     ) -> Self {
         Self {
             label: EventLabel::new(pos),
@@ -559,6 +561,7 @@ impl TCreate {
             is_daemon,
             sym_cid,
             origination_vec,
+            filtered_origination_vec,
         }
     }
 
@@ -581,6 +584,10 @@ impl TCreate {
 
     pub(crate) fn origination_vec(&self) -> Vec<u32> {
         self.origination_vec.clone()
+    }
+
+    pub(crate) fn filtered_origination_vec(&self) -> Vec<u32> {
+        self.filtered_origination_vec.clone()
     }
 }
 

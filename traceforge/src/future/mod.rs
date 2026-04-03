@@ -213,7 +213,6 @@ where
         move || {
             let mut val = crate::Val::new(());
             let mut join_waker: Option<Waker> = None;
-            let mut msg = None;
 
             // // Newer version
             // let message = recv.recv_msg();
@@ -243,6 +242,7 @@ where
             // }
 
             // New version
+            let mut msg = None;
             let message1 = fut_handles.receiver.recv_msg_block();
             if let PollerMsg::Waker(waker) = message1 {
                 // Save the waker and inform them it's Pending
@@ -258,6 +258,19 @@ where
                             match *msg {
                                 PollerMsg::Waker(_) => {
                                     fut_handles.sender.send_msg(PollerMsg::Pending);
+                                    // if we return Pending we may need to return Pending again
+                                    loop {
+                                        let message_n = fut_handles.receiver.recv_msg_block();
+                                        match message_n {
+                                            PollerMsg::Waker(_) => {
+                                                fut_handles.sender.send_msg(PollerMsg::Pending);
+                                            },
+                                            PollerMsg::Cancel => {
+                                                break;
+                                            },
+                                            _ => unreachable!(),
+                                        }
+                                    }
                                 },
                                 _ => {},
                             }
@@ -374,7 +387,7 @@ where
     let (thread_id, name) = ExecutionState::with(|state| {
         let pos = state.next_pos();
         let tid = state.must.borrow().next_thread_id(&pos);
-        let name = format!("<async_recv-{}>", tid.to_number());
+        let name = format!("traceforge_runtime::async_recv-{}", tid.to_number());
         state.must.borrow_mut().handle_tcreate(
             tid,
             task_id,

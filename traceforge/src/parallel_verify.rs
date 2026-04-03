@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -88,15 +89,26 @@ where
 
     // All exploration happens inside this scope. Rayon guarantees that all
     // spawned tasks complete before the scope exits.
-    pool.scope(|s| {
-        explore_workers_revisit_queue_rayon(
-            s,
-            conf.clone(),
-            f.clone(),
-            actual_pool_size,
-            results.clone(),
+    // Wrap with catch_unwind so that a panic from any rayon task does not
+    // prevent the final summary from being printed.
+    let scope_result = catch_unwind(AssertUnwindSafe(|| {
+        pool.scope(|s| {
+            explore_workers_revisit_queue_rayon(
+                s,
+                conf.clone(),
+                f.clone(),
+                actual_pool_size,
+                results.clone(),
+            );
+        });
+    }));
+
+    if let Err(ref e) = scope_result {
+        eprintln!(
+            "WARNING: rayon scope panicked (final results will still be printed): {:?}",
+            e
         );
-    });
+    }
 
     // --- Post-exploration: aggregate results ---
 
@@ -348,50 +360,58 @@ fn rayon_queue_task<'scope, F>(
     Must::set_current(Some(must.clone()));
 
     // --- Explore loop ---
+    // Wrap with catch_unwind so that a panic in one task does not propagate
+    // to the rayon scope (which would cause pool.scope() to re-panic and
+    // prevent the final summary from being printed).
+    let explore_result = catch_unwind(AssertUnwindSafe(|| {
+        loop {
+            // try_revisit() picks the next revisit from the current state's queue.
+            // If the current queue is empty, it pops from the saved state stack.
+            // Returns false when all revisits are exhausted.
+            if !must.borrow_mut().try_revisit() {
+                break;
+            }
 
-    loop {
-        // try_revisit() picks the next revisit from the current state's queue.
-        // If the current queue is empty, it pops from the saved state stack.
-        // Returns false when all revisits are exhausted.
-        if !must.borrow_mut().try_revisit() {
-            break;
-        }
+            // Explore for `interval` more executions from this revisit point.
+            let execs_so_far = {
+                let s = must.borrow().stats();
+                (s.execs + s.block) as u64
+            };
+            must.borrow_mut().config.max_iterations = Some(execs_so_far + interval as u64);
 
-        // Explore for `interval` more executions from this revisit point.
-        let execs_so_far = {
-            let s = must.borrow().stats();
-            (s.execs + s.block) as u64
-        };
-        must.borrow_mut().config.max_iterations = Some(execs_so_far + interval as u64);
+            explore_with_pool(&must, f, &cont_pool);
 
-        explore_with_pool(&must, f, &cont_pool);
+            // Drain saved states produced by backward revisits during this
+            // interval. These are new branching points to explore. Distribute
+            // them as child rayon tasks for parallel exploration.
+            let saved = must.borrow_mut().drain_saved_states();
+            let surplus_items = filter_nonempty_work_items(saved);
 
-        // Drain saved states produced by backward revisits during this
-        // interval. These are new branching points to explore. Distribute
-        // them as child rayon tasks for parallel exploration.
-        let saved = must.borrow_mut().drain_saved_states();
-        let surplus_items = filter_nonempty_work_items(saved);
+            if !surplus_items.is_empty() {
+                let total_revisits: usize = surplus_items
+                    .iter()
+                    .map(|(_, rq)| rq.values().map(|v| v.len()).sum::<usize>())
+                    .sum();
+                println!(
+                    "  rt{}: split {} items ({} revisits), batch_size={}",
+                    task_id, surplus_items.len(), total_revisits, batch_size,
+                );
+            }
 
-        if !surplus_items.is_empty() {
-            let total_revisits: usize = surplus_items
-                .iter()
-                .map(|(_, rq)| rq.values().map(|v| v.len()).sum::<usize>())
-                .sum();
-            println!(
-                "  rt{}: split {} items ({} revisits), batch_size={}",
-                task_id, surplus_items.len(), total_revisits, batch_size,
+            spawn_batched_tasks(
+                scope, surplus_items, conf, f, metrics, results, interval, batch_size,
             );
-        }
 
-        spawn_batched_tasks(
-            scope, surplus_items, conf, f, metrics, results, interval, batch_size,
-        );
-
-        // If current state has no more revisits, the next try_revisit()
-        // will pop from saved states (if any) or return false.
-        if must.borrow().current_rqueue_empty() {
-            break;
+            // If current state has no more revisits, the next try_revisit()
+            // will pop from saved states (if any) or return false.
+            if must.borrow().current_rqueue_empty() {
+                break;
+            }
         }
+    }));
+
+    if let Err(ref e) = explore_result {
+        eprintln!("WARNING: rayon task rt{} panicked: {:?}", task_id, e);
     }
 
     // --- Teardown: record stats and return Must + pool to caches ---

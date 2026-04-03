@@ -57,6 +57,7 @@ use std::iter;
 use std::rc::Rc;
 use std::time::Instant;
 use thread::{spawn_without_switch, JoinHandle, ThreadId};
+use std::io::Write;
 
 use crate::event_label::*;
 use crate::exec_pool::ExecutionPool;
@@ -68,6 +69,10 @@ use std::any::type_name;
 fn type_of<T>(_: &T) -> &'static str {
     type_name::<T>()
 }
+
+/// Filter pattern for thread names when computing filtered origination vectors.
+/// Threads whose names contain this string will be excluded from the count.
+pub const FILTERED_THREAD_NAME_PATTERN: &str = "traceforge";
 
 /// TraceForge exploration statistics.
 #[derive(Default, Clone, Debug)]
@@ -234,7 +239,9 @@ pub struct Config {
     pub(crate) iterations_until_split: usize,
     pub(crate) state_batch_size: usize,
     pub(crate) keep_per_execution_coverage: bool,
-    pub(crate) predetermined_choices: HashMap<String, Vec<Vec<bool>>>,    
+    pub(crate) predetermined_choices: HashMap<String, Vec<Vec<bool>>>,
+    pub(crate) predetermined_global_choices: HashMap<String, bool>,
+    pub(crate) pretty_graph_printing: bool,
     #[serde(skip)]
     pub(crate) callbacks: Arc<Mutex<Vec<Box<dyn ExecutionObserver + Send>>>>,
 }
@@ -303,6 +310,8 @@ impl ConfigBuilder {
             state_batch_size: 1,
             keep_per_execution_coverage: false,
 	        predetermined_choices: HashMap::new(),
+            predetermined_global_choices: HashMap::new(),
+            pretty_graph_printing: false,
             callbacks: Arc::new(Mutex::new(Vec::new())),
         })
     }
@@ -575,7 +584,28 @@ impl ConfigBuilder {
         self.0.predetermined_choices = choices;
         self
     }
-	 
+
+    /// Sets predetermined values for global named nondeterministic choices.
+    ///
+    /// Unlike `with_predetermined_choices`, global choices return the same value
+    /// for all calls with the same name, regardless of which thread calls it.
+    ///
+    /// Example:
+    /// ```ignore
+    /// let mut global = HashMap::new();
+    /// global.insert("feature_flag".to_string(), true);
+    /// Config::builder().with_predetermined_global_choices(global).build()
+    /// ```
+    pub fn with_predetermined_global_choices(mut self, choices: HashMap<String, bool>) -> Self {
+        self.0.predetermined_global_choices = choices;
+        self
+    }
+
+    /// Enables pretty printing of execution graphs in all output
+    pub fn with_pretty_graph_printing(mut self, pretty: bool) -> Self {
+        self.0.pretty_graph_printing = pretty;
+        self
+    }
 
     /// Consumes the builder and produces the [`Config`]
     pub fn build(self) -> Config {
@@ -750,7 +780,7 @@ where
 {
     ExecutionState::with(|s| s.must.borrow().validate_monitor_spawn(&s.curr_pos()));
 
-    let jh = spawn_without_switch(monitor_function, None, true, None, None);
+    let jh = spawn_without_switch(monitor_function, Some("traceforge_runtime::monitor".to_string()), true, None, None);
 
     // Register the monitor before calling switch(). You need to register it before
     // calling switch() because during replay, the replay execute the monitor first, find the monitor to
@@ -787,6 +817,7 @@ fn validate_locs(locs: &Vec<&Loc>) {
     for (i, c1) in locs.iter().enumerate() {
         for c2 in locs.iter().skip(i + 1) {
             if c1 == c2 {
+                std::io::stderr().flush().unwrap();
                 panic!("Detected duplicate channel {:?} in select", c1);
             }
         }
@@ -808,6 +839,7 @@ fn expect_msg<T: 'static>(val: Val) -> T {
     match val.as_any().downcast::<T>() {
         Ok(v) => *v,
         Err(_) => {
+            std::io::stderr().flush().unwrap();
             panic!(
                 "wrong message return type; expecting {} but got {}",
                 type_name::<T>(),
@@ -839,6 +871,7 @@ where
     T: Message + Clone + 'static,
 {
     futures::TryFutureExt::unwrap_or_else(spawn_receive(recv), |_| {
+        std::io::stderr().flush().unwrap();
         panic!("Async receive future failed!")
     })
 }
@@ -1156,16 +1189,31 @@ pub fn named_nondet(name: &str) -> bool {
 
         let mut must = s.must.borrow_mut();
 
-        // Use the thread's origination_vec as the map key instead of ThreadId.
-        // origination_vecs are stable across executions (they encode the spawn lineage path),
-        // whereas ThreadIds can change when scheduling decisions differ.
-        let origination_vec = must.thread_origination_vec(pos.thread);
+        // Global choice path: if this name is configured as a global choice,
+        // return the same value for all threads and all occurrences.
+        if must.config.predetermined_global_choices.contains_key(name) {
+            if let Some(&value) = must.global_named_choices.get(name) {
+                // Already resolved — reuse cached value
+                return must.handle_ctoss_predetermined(CToss::new(pos, value), value);
+            }
+            // First call — use the predetermined global value and cache it
+            let value = must.config.predetermined_global_choices[name];
+            must.global_named_choices.insert(name.to_string(), value);
+            return must.handle_ctoss_predetermined(CToss::new(pos, value), value);
+        }
+
+        // Use the thread's filtered_origination_vec as the map key instead of ThreadId.
+        // Filtered origination vecs count only thread creations (excluding internal framework threads),
+        // making them more stable across executions than event indices or raw origination vecs.
+        // ThreadIds can change when scheduling decisions differ.
+        let filtered_origination_vec = must.thread_filtered_origination_vec_from_tid(pos.thread);
+        let origination_vec = must.thread_origination_vec(pos.thread); // Keep for debugging output
 
         // Get thread index for this choice name with incremental freezing
         // Each choice name has independent thread indexing
-        // Once a (choice_name, origination_vec) pair is assigned an index, it's frozen for the entire exploration
+        // Once a (choice_name, filtered_origination_vec) pair is assigned an index, it's frozen for the entire exploration
         let thread_idx = if let Some(name_map) = must.thread_index_map.get(name) {
-            if let Some(&idx) = name_map.get(&origination_vec) {
+            if let Some(&idx) = name_map.get(&filtered_origination_vec) {
                 // Already assigned (and frozen)
                 idx
             } else {
@@ -1177,25 +1225,25 @@ pub fn named_nondet(name: &str) -> bool {
                 must.thread_index_map
                     .entry(name.to_string())
                     .or_insert_with(HashMap::new)
-                    .insert(origination_vec.clone(), idx);
+                    .insert(filtered_origination_vec.clone(), idx);
 
                 // Immediately freeze this assignment for the rest of the exploration
                 if let Some(ref mut frozen) = must.frozen_thread_index_map {
                     frozen
                         .entry(name.to_string())
                         .or_insert_with(HashMap::new)
-                        .insert(origination_vec.clone(), idx);
+                        .insert(filtered_origination_vec.clone(), idx);
                     debug!(
-                        "Assigned and froze thread index {} to origination_vec {:?} for choice '{}'",
-                        idx, origination_vec, name
+                        "Assigned and froze thread index {} to filtered_origination_vec {:?} (origination_vec {:?}) for choice '{}'",
+                        idx, filtered_origination_vec, origination_vec, name
                     );
                 }
 
-                println!(
+                debug!(
                     "[named_nondet] Index assignment for choice '{}': \
-                     thread_idx={}, origination_vec={:?}, thread={}\n\
+                     thread_idx={}, filtered_origination_vec={:?}, origination_vec={:?}, thread={}\n\
                      Graph:\n{}",
-                    name, idx, origination_vec, pos.thread, must.print_graph(None)
+                    name, idx, filtered_origination_vec, origination_vec, pos.thread, must.print_graph(None)
                 );
 
                 idx
@@ -1207,25 +1255,25 @@ pub fn named_nondet(name: &str) -> bool {
 
             // Add to current execution mapping
             let mut name_map = HashMap::new();
-            name_map.insert(origination_vec.clone(), idx);
+            name_map.insert(filtered_origination_vec.clone(), idx);
             must.thread_index_map.insert(name.to_string(), name_map);
 
             // Immediately freeze this assignment for the rest of the exploration
             if let Some(ref mut frozen) = must.frozen_thread_index_map {
                 let mut frozen_name_map = HashMap::new();
-                frozen_name_map.insert(origination_vec.clone(), idx);
+                frozen_name_map.insert(filtered_origination_vec.clone(), idx);
                 frozen.insert(name.to_string(), frozen_name_map);
                 debug!(
-                    "Assigned and froze thread index {} to origination_vec {:?} for choice '{}'",
-                    idx, origination_vec, name
+                    "Assigned and froze thread index {} to filtered_origination_vec {:?} (origination_vec {:?}) for choice '{}'",
+                    idx, filtered_origination_vec, origination_vec, name
                 );
             }
 
-            eprintln!(
+            debug!(
                 "[named_nondet] Index assignment for choice '{}': \
-                 thread_idx={}, origination_vec={:?}, thread={}\n\
+                 thread_idx={}, filtered_origination_vec={:?}, origination_vec={:?}, thread={}\n\
                  Graph:\n{}",
-                name, idx, origination_vec, pos.thread, must.print_graph(None)
+                name, idx, filtered_origination_vec, origination_vec, pos.thread, must.print_graph(None)
             );
 
             idx
@@ -1265,7 +1313,7 @@ pub fn named_nondet(name: &str) -> bool {
 
         // Assert: if predetermined choices exist for this choice name but there is
         // no entry for this thread_idx, something is likely wrong. This can indicate
-        // origination_vec instability: the thread got a shifted origination_vec, was
+        // origination_vec instability: the thread got a shifted filtered_origination_vec, was
         // assigned a new index beyond the configured predetermined range.
         if let Some(thread_choices) = must.config.predetermined_choices.get(name) {
             if thread_choices.get(thread_idx).is_none() {
@@ -1273,16 +1321,19 @@ pub fn named_nondet(name: &str) -> bool {
                     .as_ref()
                     .map(|fm| format!("{:#?}", fm))
                     .unwrap_or_else(|| "None".to_string());
+                std::io::stderr().flush().unwrap();
                 panic!(
                     "[named_nondet] Choice '{}' has {} predetermined thread entries \
                      but thread_idx={} has no entry (occurrence={}).\n\
                      This may indicate origination_vec instability.\n\
                      Thread: {}\n\
+                     Filtered origination vec: {:?}\n\
                      Origination vec: {:?}\n\
                      Frozen thread index map:\n{}\n\
                      Graph:\n{}",
                     name, thread_choices.len(), thread_idx, current_occurrence,
                     pos.thread,
+                    filtered_origination_vec,
                     origination_vec,
                     frozen_map_str,
                     must.print_graph(None)
@@ -1496,7 +1547,7 @@ pub fn assert(cond: bool) {
                     println!("{}", must.print_graph(None));
                     // The graph is completely generated, now build the linearization
                     must.store_replay_information(Some(pos));
-
+                    std::io::stderr().flush().unwrap();
                     // Report the failure
                     assert!(cond);
                 }

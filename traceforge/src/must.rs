@@ -42,6 +42,7 @@ macro_rules! cast {
         if let $pat(a) = $target {
             a
         } else {
+            std::io::stderr().flush().unwrap();
             panic!("mismatch variant when cast to {}", stringify!($pat));
         }
     }};
@@ -135,6 +136,8 @@ pub(crate) struct Must {
     pub(crate) next_thread_index: HashMap<String, usize>,
     // Per-execution counters: (choice_name, thread_idx) -> occurrence count
     pub(crate) choice_occurrence_counters: HashMap<(String, usize), usize>,
+    // Cache for global named choices: once resolved, the same value is returned for all threads
+    pub(crate) global_named_choices: HashMap<String, bool>,
     // Maximum number of events across all complete (non-blocked) execution graphs
     max_complete_graph_events: usize,
 }
@@ -170,6 +173,7 @@ impl Must {
             thread_index_map: HashMap::new(),
             next_thread_index: HashMap::new(),
             choice_occurrence_counters: HashMap::new(),
+            global_named_choices: HashMap::new(),
             max_complete_graph_events: 0,
         }
     }
@@ -195,6 +199,7 @@ impl Must {
         self.thread_index_map.clear();
         self.next_thread_index.clear();
         self.choice_occurrence_counters.clear();
+        self.global_named_choices.clear();
 
     }
 
@@ -240,6 +245,7 @@ impl Must {
         }
 
         must.choice_occurrence_counters.clear();
+        must.global_named_choices.clear();
 
         // TODO: when must is borrowed, the panic handler cannot capture
         // a counterexample. run_metrics_before() invokes must model code
@@ -318,6 +324,7 @@ impl Must {
         self.published_values.clear();
         self.started_at = Instant::now();
         self.choice_occurrence_counters.clear();
+        self.global_named_choices.clear();
         self.max_complete_graph_events = 0;
         // Reset telemetry so stats() starts from zero for this task.
         self.telemetry = Telemetry::new(self.config.keep_per_execution_coverage);
@@ -415,6 +422,7 @@ impl Must {
                     info!("|| Consuming {}", label);
                     self.replay_info.reset_current_event();
                 } else {
+                    std::io::stderr().flush().unwrap();
                     panic!(
                         "Replay failure: Executing {} instead of the counterexample's {}",
                         label.pos(),
@@ -538,6 +546,73 @@ impl Must {
         self.current.graph.get_thread_tclab(tid).origination_vec()
     }
 
+    /// Returns the filtered_origination_vec for the given thread.
+    pub(crate) fn thread_filtered_origination_vec_from_tid(&self, tid: ThreadId) -> Vec<u32> {
+        self.current.graph.get_thread_tclab(tid).filtered_origination_vec()
+    }
+
+    /// Returns a filtered origination_vec for the given thread.
+    ///
+    /// Unlike the standard origination_vec which uses event indices (pos.index),
+    /// this version counts only thread creation events whose names don't contain
+    /// the filter pattern (defined by FILTERED_THREAD_NAME_PATTERN).
+    ///
+    /// This provides more stable indexing across executions when internal framework
+    /// threads (like those named "traceforge") may vary in timing but application
+    /// threads follow a consistent spawn pattern.
+    pub(crate) fn thread_filtered_origination_vec(&self, tid: ThreadId, filter_pattern: &str) -> Vec<u32> {
+        let origination_vec = self.current.graph.get_thread_tclab(tid).origination_vec();
+        let mut filtered_vec = Vec::new();
+
+        // Walk through the origination_vec, which represents the spawn lineage
+        let mut current_thread = crate::thread::main_thread_id();
+
+        for &event_idx in &origination_vec {
+            // Count TCreate events in current_thread up to and including event_idx
+            // that don't have the filter pattern in their name
+            let count = self.count_filtered_tcreate_events(current_thread, event_idx, filter_pattern);
+            filtered_vec.push(count);
+
+            // Move to the spawned thread for the next iteration
+            let spawn_event = Event::new(current_thread, event_idx);
+            if let LabelEnum::TCreate(tclab) = self.current.graph.label(spawn_event) {
+                current_thread = tclab.cid();
+            }
+        }
+
+        filtered_vec
+    }
+
+    /// Counts the number of TCreate events in the given thread up to and including
+    /// the specified event index, excluding those whose names contain the filter pattern.
+    fn count_filtered_tcreate_events(&self, thread: ThreadId, up_to_index: u32, filter_pattern: &str) -> u32 {
+        let mut count = 0;
+        let thread_size = self.current.graph.thread_size(thread) as u32;
+
+        // Iterate only up to the minimum of up_to_index and the actual thread size - 1
+        // (since we're currently adding a new event at up_to_index, it may not exist yet)
+        let max_idx = up_to_index.min(thread_size.saturating_sub(1));
+
+        for idx in 0..=max_idx {
+            let event = Event::new(thread, idx);
+            if let LabelEnum::TCreate(tclab) = self.current.graph.label(event) {
+                // Check if this thread creation should be counted
+                let should_count = if let Some(ref name) = tclab.name() {
+                    !name.contains(filter_pattern)
+                } else {
+                    // Unnamed threads are counted
+                    true
+                };
+
+                if should_count {
+                    count += 1;
+                }
+            }
+        }
+
+        count
+    }
+
     pub(crate) fn handle_tcreate(
         &mut self,
         tid: ThreadId,
@@ -551,7 +626,16 @@ impl Must {
         let mut origination_vec = parent_tclab.origination_vec();
         origination_vec.push(pos.index);
 
-        let tclab = TCreate::new(pos, tid, name, is_daemon, sym_cid, origination_vec);
+        // Compute filtered_origination_vec
+        let mut filtered_origination_vec = parent_tclab.filtered_origination_vec();
+        let filtered_count = self.count_filtered_tcreate_events(
+            pos.thread,
+            pos.index,
+            crate::FILTERED_THREAD_NAME_PATTERN
+        );
+        filtered_origination_vec.push(filtered_count);
+
+        let tclab = TCreate::new(pos, tid, name, is_daemon, sym_cid, origination_vec, filtered_origination_vec);
 
         if self.is_replay(pos) {
             info!("| Replay Mode for {}", tclab);
@@ -644,6 +728,7 @@ impl Must {
             if let LabelEnum::CToss(tclab) = self.current.graph.label(ctlab.pos()) {
                 return tclab.result();
             }
+            std::io::stderr().flush().unwrap();
             panic!();
         }
         info!("| Handle Mode for {}", ctlab);
@@ -706,6 +791,7 @@ impl Must {
             if let LabelEnum::Choice(tclab) = self.current.graph.label(chlab.pos()) {
                 return tclab.result();
             }
+            std::io::stderr().flush().unwrap();
             panic!();
         }
         info!("| Handle Mode for {}", chlab);
@@ -1092,6 +1178,7 @@ impl Must {
                 // Store the replay information first.
                 must.borrow_mut().store_replay_information(None);
                 println!("{}", must.borrow_mut().print_graph(None));
+                std::io::stderr().flush().unwrap();
                 panic!(
                     "\u{1b}[1;31mA monitor returned the message: {}\u{1b}[0m",
                     msg
@@ -1686,7 +1773,11 @@ impl Must {
     }
 
     pub(crate) fn print_graph(&self, pos: Option<Event>) -> String {
-        let out = format!("{}", self.current.graph);
+        let out = if self.config.pretty_graph_printing {
+            format!("{}", self.current.graph.pretty_display())
+        } else {
+            format!("{}", self.current.graph)
+        };
         if self.config.dot_file.is_some() {
             self.print_graph_dot(pos)
                 .expect("could not dot-print to supplied file");
@@ -1695,7 +1786,7 @@ impl Must {
             self.print_graph_trace(pos)
                 .expect("could not print trace to supplied file");
         }
-
+        
         out
     }
 

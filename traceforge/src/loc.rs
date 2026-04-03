@@ -112,6 +112,10 @@ impl SendLoc {
     pub(crate) fn loc(&self) -> &Loc {
         self.loc.as_ref().unwrap()
     }
+
+    pub(crate) fn loc_opt(&self) -> Option<&Loc> {
+        self.loc.as_ref()
+    }
 }
 
 // TODO: How to Display?

@@ -160,7 +160,7 @@ impl<T: ?Sized> Mutex<T> {
         let mut tsync = Synchronizer::new();
 
         let tsync_handle = thread::Builder::new()
-            .name("Mutex synchronizer".to_string())
+            .name("traceforge_runtime::mutex".to_string())
             .spawn_daemon(move || {
                 tsync.execute();
             })

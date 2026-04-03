@@ -99,7 +99,7 @@ where
         let mut synchronizer = MustRwLock::new(max_readers);
 
         let backing_tid = crate::thread::Builder::new()
-            .name("rwlock".into())
+            .name("traceforge_runtime::rwlock".into())
             .spawn_daemon(move || synchronizer.run())
             .unwrap()
             .thread()
