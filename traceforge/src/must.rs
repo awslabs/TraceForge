@@ -1431,7 +1431,25 @@ impl Must {
             }
         }
 
-        // TODO: estimation mode picker that understands placements
+        // Estimation mode currently samples backward revisits for plain receives only
+        if self.config.mode == ExplorationMode::Estimation {
+            let recv_revs: Vec<Event> = revs
+                .iter()
+                .filter_map(|item| {
+                    let RevisitEnum::BackwardRevisit(r) = item else {
+                        return None;
+                    };
+                    match &r.rev {
+                        RevisitPlacement::Default(send) if *send == pos => Some(r.pos),
+                        _ => None, // TODO: support inbox in estimation mode.
+                    }
+                })
+                .collect();
+
+            self.pick_revisit(recv_revs, pos);
+            return;
+        }
+
         for rev in revs {
             info!(
                 "  [revisit/backward] enqueue {}",
