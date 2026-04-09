@@ -1,5 +1,6 @@
 //! Revisiting utilities
 
+use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::event::Event;
@@ -18,7 +19,7 @@ impl RevisitEnum {
     pub(crate) fn new_forward(pos: Event, placement: Event) -> Self {
         RevisitEnum::ForwardRevisit(Revisit {
             pos,
-            rev: placement,
+            rev: RevisitPlacement::Default(placement),
         })
     }
 
@@ -26,7 +27,15 @@ impl RevisitEnum {
     pub(crate) fn new_backward(recv: Event, send: Event) -> Self {
         RevisitEnum::BackwardRevisit(Revisit {
             pos: recv,
-            rev: send,
+            rev: RevisitPlacement::Default(send),
+        })
+    }
+
+    /// Forward revisit for an inbox event, replacing its chosen send set.
+    pub(crate) fn new_forward_inbox(pos: Event, placements: Vec<Event>) -> Self {
+        RevisitEnum::ForwardRevisit(Revisit {
+            pos,
+            rev: RevisitPlacement::Inbox(placements),
         })
     }
 
@@ -40,8 +49,34 @@ impl RevisitEnum {
         self.get_revisit().pos
     }
 
-    pub(crate) fn rev(&self) -> Event {
-        self.get_revisit().rev
+    pub(crate) fn rev(&self) -> RevisitPlacement {
+        self.get_revisit().rev.clone()
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) enum RevisitPlacement {
+    /// Classic revisit placement: single rf send.
+    Default(Event),
+    /// Inbox revisit placement: the whole (order-insensitive) chosen send set.
+    Inbox(Vec<Event>),
+}
+
+impl fmt::Display for RevisitPlacement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RevisitPlacement::Default(ev) => write!(f, "{}", ev),
+            RevisitPlacement::Inbox(events) => {
+                write!(f, "{{")?;
+                for (i, ev) in events.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", ev)?;
+                }
+                write!(f, "}}")
+            }
+        }
     }
 }
 
@@ -51,11 +86,21 @@ pub(crate) struct Revisit {
     /// the event whoce placement (rf or co choice) chages
     pub(crate) pos: Event,
     /// the placement (rf or co choice)
-    pub(crate) rev: Event,
+    pub(crate) rev: RevisitPlacement,
 }
 
 impl Revisit {
     pub(crate) fn new(pos: Event, rev: Event) -> Self {
-        Self { pos, rev }
+        Self {
+            pos,
+            rev: RevisitPlacement::Default(rev),
+        }
+    }
+
+    pub(crate) fn new_inbox(pos: Event, rev: Vec<Event>) -> Self {
+        Self {
+            pos,
+            rev: RevisitPlacement::Inbox(rev),
+        }
     }
 }
