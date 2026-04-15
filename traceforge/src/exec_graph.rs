@@ -7,7 +7,7 @@ use crate::channel::Thread;
 use crate::event::Event;
 use crate::indexed_map::IndexedMap;
 use crate::loc::{Loc, RecvLoc};
-use crate::revisit::Revisit;
+use crate::revisit::{Revisit, RevisitPlacement};
 use crate::runtime::task::TaskId;
 use crate::thread::{construct_thread_id, main_thread_id};
 use crate::vector_clock::VectorClock;
@@ -191,41 +191,45 @@ impl ExecutionGraph {
     pub(crate) fn rev_matching_recvs<'a>(
         &'a self,
         send: &'a SendMsg,
-    ) -> impl Iterator<Item = &'a RecvMsg> {
-        let init = self.recvs.get(send.loc()).map(move |vec| {
-            vec.iter()
-                .map(move |&pos| self.recv_label(pos).unwrap())
-                // In *reverse* stamp order
-                .rev()
-        });
-        // Iterate over the receives that can read from the send
-        let init: Box<dyn Iterator<Item = &RecvMsg>> = match init {
-            Some(i) => Box::new(i),
-            None => Box::new(std::iter::empty()),
-        };
-        // Get the receives that can *monitor* the send
-        send.monitor_sends()
-            .keys()
-            .map(|&tid| {
-                self.recvs.get(&Loc::new(Thread(tid))).map(|v| {
-                    v.iter()
-                        .map(move |&pos| self.recv_label(pos).unwrap())
-                        // Again, *reverse* stamp order
-                        .rev()
+    ) -> impl Iterator<Item = RecvLike<'a>> {
+        // helper to turn cached positions into RecvLike, in reverse stamp order
+        let mk_iter = move |loc: &Loc| {
+            self.recvs
+                .get(loc)
+                .into_iter()
+                .flat_map(|vec| vec.iter().rev()) // positions are in stamp order; reverse for decreasing stamp
+                .filter_map(move |&pos| match self.label(pos) {
+                    LabelEnum::RecvMsg(r) if RecvLike::RecvMsg(r).matches(send) => {
+                        Some(RecvLike::RecvMsg(r))
+                    }
+                    LabelEnum::Inbox(i) if RecvLike::Inbox(i).matches(send) => {
+                        Some(RecvLike::Inbox(i))
+                    }
+                    _ => None,
                 })
-            })
-            .flatten()
-            // Chain all together, respecting the (reverse) stamp order
-            .fold(init, |acc, it| {
+        };
+
+        // base: receivers on the send’s normal channel
+        let base = mk_iter(send.loc());
+
+        // monitors: receivers on the legacy monitor channel(s)
+        let monitor_iters = send
+            .monitor_sends()
+            .keys()
+            .map(|&tid| mk_iter(&Loc::new(Thread(tid))));
+
+        // merge all reversed iterators, keeping reverse stamp order
+        monitor_iters.fold(
+            Box::new(base) as Box<dyn Iterator<Item = RecvLike<'a>>>,
+            |acc, it| {
                 Box::new(merging_iterator::MergeIter::with_custom_ordering(
                     acc,
-                    it,
-                    // *Reverse* comparison, since we're combining reversed iterators
-                    |a, b| a.stamp() > b.stamp(),
+                    Box::new(it),
+                    // reverse order: larger stamp first
+                    |a: &RecvLike<'a>, b: &RecvLike<'a>| a.stamp() > b.stamp(),
                 ))
-            })
-            // Filter tags
-            .filter(move |&rlab| rlab.recv_loc().matches_tag(send))
+            },
+        )
     }
 
     pub(crate) fn stamp(&self) -> usize {
@@ -398,11 +402,11 @@ impl ExecutionGraph {
                         BlockType::Assert => {
                             return Some(BlockType::Assert);
                         }
-                        BlockType::Value(loc) => {
+                        BlockType::Value(loc, min) => {
                             if self.is_thread_daemon(t) {
                                 continue;
                             } else {
-                                ret = Some(BlockType::Value(loc.clone()));
+                                ret = Some(BlockType::Value(loc.clone(), *min));
                             }
                         }
                         block => {
@@ -507,6 +511,10 @@ impl ExecutionGraph {
         matches!(self.label(e), LabelEnum::RecvMsg(_))
     }
 
+    pub(crate) fn is_inbox(&self, e: Event) -> bool {
+        matches!(self.label(e), LabelEnum::Inbox(_))
+    }
+
     pub(crate) fn recv_label(&self, e: Event) -> Option<&RecvMsg> {
         if let LabelEnum::RecvMsg(l) = self.label(e) {
             Some(l)
@@ -515,8 +523,24 @@ impl ExecutionGraph {
         }
     }
 
+    pub(crate) fn inbox_label(&self, e: Event) -> Option<&Inbox> {
+        if let LabelEnum::Inbox(l) = self.label(e) {
+            Some(l)
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn recv_label_mut(&mut self, e: Event) -> Option<&mut RecvMsg> {
         if let LabelEnum::RecvMsg(l) = self.label_mut(e) {
+            Some(l)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn inbox_label_mut(&mut self, e: Event) -> Option<&mut Inbox> {
+        if let LabelEnum::Inbox(l) = self.label_mut(e) {
             Some(l)
         } else {
             None
@@ -537,13 +561,52 @@ impl ExecutionGraph {
         }
     }
 
+    pub(crate) fn inbox_val(&self, e: Event) -> Option<Vec<Val>> {
+        match self.label(e) {
+            LabelEnum::Inbox(ilab) => {
+                if let Some(rfs) = ilab.rfs() {
+                    // Values are returned in the same event-order as the stored inbox rfs.
+                    let vals: Vec<Val> = rfs
+                        .iter()
+                        .filter_map(|rf| {
+                            if self.contains(*rf) {
+                                self.send_label(*rf).map(|s| s.val().clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    Some(vals)
+                } else {
+                    None
+                }
+            }
+            LabelEnum::Block(_) => None, // This happens during replay.
+            a => panic!("Expecting Inbox or Block but got {}", a),
+        }
+    }
+
     /// Returns the value received by e. Returns None if e is Block.
     pub(crate) fn val_copy(&self, rpos: Event) -> Option<Val> {
         self.val(rpos).cloned()
     }
 
+    pub(crate) fn vals_copy(&self, ipos: Event) -> Option<Vec<Val>> {
+        self.inbox_val(ipos)
+    }
+
     pub(crate) fn is_send(&self, e: Event) -> bool {
         matches!(self.label(e), LabelEnum::SendMsg(_))
+    }
+
+    pub(crate) fn are_sends(&self, events: Vec<Event>) -> bool {
+        for ev in events {
+            let m = matches!(self.label(ev), LabelEnum::SendMsg(_));
+            if !m {
+                return false;
+            }
+        }
+        true
     }
 
     pub(crate) fn send_label(&self, e: Event) -> Option<&SendMsg> {
@@ -574,7 +637,16 @@ impl ExecutionGraph {
     // N.B. it doesn't include the revisitor's rf/Create/End dependencies
     pub(crate) fn revisit_view(&self, rev: &Revisit) -> VectorClock {
         let mut v = self.view_from_stamp(self.label(rev.pos).stamp());
-        v.update(self.send_label(rev.rev).unwrap().porf());
+        match rev.rev.clone() {
+            RevisitPlacement::Default(send) => {
+                v.update(self.send_label(send).unwrap().porf());
+            }
+            RevisitPlacement::Inbox(sends) => {
+                for send in sends {
+                    v.update(self.send_label(send).unwrap().porf());
+                }
+            }
+        };
 
         // v.update() may cause more TCreate labs to be visible in the vector clock
         // Find those TCreate labels and add their corresponding Begin labels to the clock.
@@ -610,15 +682,33 @@ impl ExecutionGraph {
 
     /// Return the index of the receiving channel, if any
     pub(crate) fn get_receiving_index(&self, rlab: &RecvMsg) -> Option<usize> {
-        rlab.rf().map(|send| {
+        rlab.rf().and_then(|send| {
             let slab = self.send_label(send).unwrap();
             if rlab.monitors(slab) {
                 // Monitor receives should have a single (legacy) channel
-                0
+                Some(0)
             } else {
-                rlab.recv_loc().get_matching_index(slab.send_loc())
+                Some(rlab.recv_loc().get_matching_index(slab.send_loc()))
             }
         })
+    }
+
+    pub(crate) fn get_receiving_indexes(&self, ilab: &Inbox) -> Vec<Option<usize>> {
+        match ilab.rfs() {
+            None => Vec::new(),
+            // Keep indexes aligned with ilab.rfs() order.
+            Some(rfs) => rfs
+                .iter()
+                .map(|send| {
+                    if self.contains(*send) {
+                        self.send_label(*send)
+                            .map(|slab| ilab.recv_loc().get_matching_index(slab.send_loc()))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        }
     }
 
     // Removes recv from the send's readers
@@ -632,6 +722,18 @@ impl ExecutionGraph {
             }
             if old_send.reader().is_some_and(|r| r == recv) {
                 old_send.set_reader(None);
+            }
+        }
+    }
+
+    fn remove_from_readers_inbox(&mut self, recv: Event) {
+        // Clone the rf list first so we can mutate send labels without borrowing `self` twice.
+        if let Some(rfs) = self.inbox_label(recv).unwrap().rfs() {
+            for send in rfs {
+                let old_send = self.send_label_mut(send).unwrap();
+                if old_send.reader().is_some_and(|r| r == recv) {
+                    old_send.set_reader(None);
+                }
             }
         }
     }
@@ -662,6 +764,26 @@ impl ExecutionGraph {
 
         // Set the recv's rf to the new send
         self.recv_label_mut(recv).unwrap().set_rf(send);
+    }
+
+    pub(crate) fn change_inbox_rfs(&mut self, inbox: Event, sends: Option<Vec<Event>>) {
+        assert!(self.is_inbox(inbox));
+        assert!(sends.as_ref().is_none() || self.are_sends(sends.as_ref().unwrap().clone()));
+
+        // Recompute reader edges for the inbox atomically: clear old edges first.
+        self.remove_from_readers_inbox(inbox);
+
+        // Set inbox as a reader of the new sends
+        if let Some(new_sends) = sends {
+            for new_send in &new_sends {
+                self.send_label_mut(*new_send)
+                    .unwrap()
+                    .set_reader(Some(inbox));
+            }
+            self.inbox_label_mut(inbox).unwrap().set_rf(Some(new_sends));
+        } else {
+            self.inbox_label_mut(inbox).unwrap().set_rf(None);
+        }
     }
 
     fn check_spawn_invariants(&self) {
@@ -790,6 +912,19 @@ impl ExecutionGraph {
         });
     }
 
+    pub(crate) fn register_inbox(&mut self, inbox: &Event) {
+        let ilab = self.inbox_label(*inbox);
+        // We might have been called with a Block event, ignore it
+        if ilab.is_none() {
+            return;
+        }
+        // Inboxes share the same recv-location index used to find matching receives.
+        let locs = ilab.unwrap().recv_loc().locs().clone();
+        locs.iter().for_each(|l| {
+            self.recvs.entry(l.clone()).or_default().push(*inbox);
+        });
+    }
+
     pub(crate) fn dropped_sends(&self) -> usize {
         self.dropped_sends
     }
@@ -840,17 +975,23 @@ impl ExecutionGraph {
 
         // Readers cache: remove the deleted receives from the sender's readers cache
         let mut deleted_receives = vec![];
+        let mut deleted_receives_inbox = vec![];
         for threads in self.threads.iter() {
             let j = threads.labels.partition_point(|lab| v.contains(lab.pos()));
             for lab in threads.labels[j..].iter() {
-                if let LabelEnum::RecvMsg(rlab) = lab {
-                    deleted_receives.push(rlab.pos());
+                match lab {
+                    LabelEnum::RecvMsg(rlab) => deleted_receives.push(rlab.pos()),
+                    LabelEnum::Inbox(ilab) => deleted_receives_inbox.push(ilab.pos()),
+                    _ => {}
                 }
             }
         }
 
         for deleted in deleted_receives {
             self.remove_from_readers(deleted);
+        }
+        for deleted in deleted_receives_inbox {
+            self.remove_from_readers_inbox(deleted);
         }
 
         // Erase all the threads not found in the vector clock.
@@ -914,6 +1055,13 @@ impl ExecutionGraph {
                     porf.update(self.label(rf).cached_porf());
                 }
             }
+            LabelEnum::Inbox(ilab) => {
+                if let Some(rfs) = ilab.rfs() {
+                    for rf in rfs {
+                        porf.update(self.label(rf).cached_porf());
+                    }
+                }
+            }
             _ => { /* Nothing more to do */ }
         };
         porf
@@ -949,6 +1097,15 @@ impl ExecutionGraph {
                     }
                 }
             }
+            LabelEnum::Inbox(ilab) => {
+                if let Some(rfs) = ilab.rfs() {
+                    for rf in rfs {
+                        if self.label(rf).cached_porf().contains(first) {
+                            return true;
+                        }
+                    }
+                }
+            }
             _ => { /* Nothing more to do */ }
         };
         lab.cached_porf().contains(first)
@@ -961,8 +1118,8 @@ impl ExecutionGraph {
     /// This helps us obtain a minimal execution trace since there might be other
     /// nodes in the graph that are not relevant to the assertion violation.
     pub(crate) fn top_sort(&self, pos: Option<Event>) -> REPLAY::TopologicallySortedExecutionGraph {
-        let maxs = if let Some(ev) = pos {
-            vec![ev]
+        let maxs = if pos.is_some() {
+            vec![pos.unwrap()]
         } else {
             self.threads
                 .iter()
@@ -1013,6 +1170,13 @@ impl ExecutionGraph {
             if self.is_recv(ei) && self.recv_label(ei).unwrap().rf().is_some() {
                 self.top_sort_util(view, graph, self.recv_label(ei).unwrap().rf().unwrap());
             }
+            if self.is_inbox(ei) {
+                if let Some(rfs) = self.inbox_label(ei).unwrap().rfs() {
+                    for rf in rfs {
+                        self.top_sort_util(view, graph, rf);
+                    }
+                }
+            }
 
             // If the event is a TJoin, call `top_sort_util` on the terminating thread
             if let LabelEnum::TJoin(jlab) = self.label(ei) {
@@ -1059,6 +1223,33 @@ impl std::fmt::Display for ExecutionGraph {
         }
         // TODO: Display Sends per channel?
         Ok(())
+    }
+}
+
+pub(crate) enum RecvLike<'a> {
+    RecvMsg(&'a RecvMsg),
+    Inbox(&'a Inbox),
+}
+
+impl<'a> RecvLike<'a> {
+    fn stamp(&self) -> usize {
+        match self {
+            RecvLike::RecvMsg(r) => r.stamp(),
+            RecvLike::Inbox(i) => i.stamp(),
+        }
+    }
+    fn matches(&self, send: &SendMsg) -> bool {
+        match self {
+            RecvLike::RecvMsg(r) => r.recv_loc().matches_tag(send) && r.matches(send),
+            RecvLike::Inbox(i) => i.matches(send),
+        }
+    }
+
+    pub fn pos(&self) -> Event {
+        match self {
+            RecvLike::RecvMsg(r) => r.pos(),
+            RecvLike::Inbox(i) => i.pos(),
+        }
     }
 }
 
