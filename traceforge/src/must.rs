@@ -12,8 +12,9 @@ use crate::{event_label::*, ExecutionState, MonitorAcceptorFn, MonitorCreateFn};
 use crate::{replay as REPLAY, Val};
 use crate::{Config, ExplorationMode, SchedulePolicy, Stats};
 use log::{debug, info, trace, warn};
-use rand::distributions::Distribution;
-use rand::{prelude::SliceRandom, Rng, SeedableRng};
+use rand::distr::Distribution;
+use rand::seq::IndexedRandom;
+use rand::{Rng, SeedableRng};
 use rand_pcg::Pcg64Mcg;
 
 use core::panic;
@@ -194,7 +195,7 @@ impl Must {
     }
 
     pub(crate) fn gen_bool(&mut self) -> bool {
-        self.rng.gen_range(0..=1) == 0
+        self.rng.random_range(0..=1) == 0
     }
 	 
     pub(crate) fn current() -> Option<Rc<RefCell<Must>>> {
@@ -1063,7 +1064,7 @@ impl Must {
                     self.telemetry
                         .histogram(EXECS_EST.to_owned(), (rfs.len() + 1) as f64);
 
-                    let idx = self.rng.gen_range(0..=rfs.len());
+                    let idx = self.rng.random_range(0..=rfs.len());
 
                     info!("| Choosing {} out of {}", idx, rfs.len());
 
@@ -1092,7 +1093,7 @@ impl Must {
                 self.telemetry
                     .histogram(EXECS_EST.to_owned(), rfs.len() as f64);
 
-                let idx = self.rng.gen_range(0..=(rfs.len() - 1));
+                let idx = self.rng.random_range(0..=(rfs.len() - 1));
 
                 info!("| Choosing {} out of {}", idx, rfs.len());
 
@@ -1488,7 +1489,7 @@ impl Must {
     fn pick_ctoss(&mut self, pos: Event) -> bool {
         self.telemetry.histogram(EXECS_EST.to_owned(), 2.0);
 
-        let toss = rand::thread_rng().gen_range(0..=1) == 0;
+        let toss = rand::rng().random_range(0..=1) == 0;
         cast!(self.current.graph.label_mut(pos), LabelEnum::CToss).set_result(toss);
         toss
     }
@@ -1498,7 +1499,7 @@ impl Must {
         let range = choice.range();
         let start = *range.start();
         let end = *range.end();
-        let rand_value = rand::thread_rng().gen_range(start..=end);
+        let rand_value = rand::rng().random_range(start..=end);
         choice.set_result(rand_value);
 
         self.telemetry
@@ -1515,7 +1516,7 @@ impl Must {
         self.telemetry
             .histogram(EXECS_EST.to_owned(), (revs.len() + 1) as f64);
 
-        let idx = rand::thread_rng().gen_range(0..=revs.len());
+        let idx = rand::rng().random_range(0..=revs.len());
         if idx < revs.len() {
             push_worklist(
                 &mut self.current.rqueue,
@@ -1830,7 +1831,7 @@ fn pop_worklist(worklist: &mut RQueue, is_arbitrary: bool, rng: &mut Pcg64Mcg) -
         }
         else {
             // Choose randomly from alternatives at the highest stamp
-	        let idx = rng.gen_range(0..revs.len());
+	        let idx = rng.random_range(0..revs.len());
 	        let rev = revs.swap_remove(idx);
             (*stamp, rev, revs.is_empty())
         }
