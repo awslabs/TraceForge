@@ -3,7 +3,7 @@ use traceforge::{
     thread::{self, ThreadId},
     Config,
 };
-use rand::distributions::{Bernoulli, Uniform};
+use rand::distr::{Bernoulli, Uniform};
 
 //mod utils;
 
@@ -11,7 +11,7 @@ use rand::distributions::{Bernoulli, Uniform};
 fn sample_basic() {
     let n = 10;
     let stats = traceforge::verify(Config::builder().build(), move || {
-        let s: u32 = traceforge::sample(Uniform::new(0, 100), n);
+        let s: u32 = traceforge::sample(Uniform::new(0, 100).unwrap(), n);
         println!("HERE {s}");
     });
     println!("Stats: {} {}", stats.execs, stats.block);
@@ -22,7 +22,7 @@ fn sample_with_nondet_choice() {
     let n = 10;
     let stats = traceforge::verify(Config::builder().with_verbose(1).build(), move || {
         if traceforge::nondet() {
-            let s: u32 = traceforge::sample(Uniform::new(0, 100), n);
+            let s: u32 = traceforge::sample(Uniform::new(0, 100).unwrap(), n);
             println!("HERE {s}");
         }
     });
@@ -35,12 +35,12 @@ fn sample_with_comm() {
     let stats = traceforge::verify(Config::builder().with_verbose(1).build(), move || {
         let tid = thread::spawn(|| {
             let r: u32 = recv_msg_block();
-            let t: u32 = traceforge::sample(Uniform::new(0, 1), r as usize);
+            let t: u32 = traceforge::sample(Uniform::new(0, 1).unwrap(), r as usize);
             println!("t = {t}");
         })
         .thread()
         .id();
-        let s: u32 = traceforge::sample(Uniform::new(1, 6), n);
+        let s: u32 = traceforge::sample(Uniform::new(1, 6).unwrap(), n);
         send_msg(tid, s);
     });
     println!("Stats: {} {}", stats.execs, stats.block);
