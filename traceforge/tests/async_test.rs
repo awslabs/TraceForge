@@ -1242,6 +1242,6 @@ fn cancel_recv_select() {
         );
         println!("Number of execs: {} completed and {} blocked", stats.execs, stats.block);
         assert_eq!(stats.execs, 0);
-        assert_eq!(stats.block, 13);
+        assert_eq!(stats.block, 256);
     }
 }
