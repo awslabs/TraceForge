@@ -1322,10 +1322,10 @@ pub fn named_nondet(name: &str) -> bool {
                     .map(|fm| format!("{:#?}", fm))
                     .unwrap_or_else(|| "None".to_string());
                 std::io::stderr().flush().unwrap();
-                panic!(
+                debug!(
                     "[named_nondet] Choice '{}' has {} predetermined thread entries \
                      but thread_idx={} has no entry (occurrence={}).\n\
-                     This may indicate origination_vec instability.\n\
+                     This indicates lack of predetermined values.\n\
                      Thread: {}\n\
                      Filtered origination vec: {:?}\n\
                      Origination vec: {:?}\n\
