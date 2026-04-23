@@ -13,6 +13,7 @@ use crate::thread::{construct_thread_id, main_thread_id};
 use crate::vector_clock::VectorClock;
 use crate::{event_label::*, Val};
 use crate::{replay as REPLAY, ThreadId};
+use log::{info, trace, debug};
 
 /// Encapsulates the execution information about a single thread
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -40,6 +41,9 @@ pub(crate) struct ExecutionGraph {
     #[serde(skip)]
     recvs: HashMap<Loc, Vec<Event>>,
     dropped_sends: usize,
+    /// Debug: set of all events at the start of execution, events removed as they are replayed.
+    #[serde(skip)]
+    pub(crate) unreplayed_events: HashSet<Event>,
 }
 
 impl ExecutionGraph {
@@ -59,6 +63,7 @@ impl ExecutionGraph {
             sends: HashMap::new(),
             recvs: HashMap::new(),
             dropped_sends: 0,
+            unreplayed_events: HashSet::new(),
         }
     }
 
@@ -74,6 +79,13 @@ impl ExecutionGraph {
 
         // Reset all the other task ids to None
         for t in &mut self.threads.iter_mut().skip(1) {
+            // if let Some(id) = t.task_id {
+            //     self.task_id_map.remove(&id);
+            // }
+            // else {
+            //     debug!("[DEBUG cut_to_view] thread {} has task_id={:?} and num_labels={}", t.tid, t.task_id, t.labels.len());
+            // }
+            debug!("[DEBUG initialize] thread {} has task_id={:?} and num_labels={}", t.tid, t.task_id, t.labels.len());
             self.task_id_map.remove(&t.task_id.unwrap());
             t.task_id = None;
         }
@@ -98,6 +110,24 @@ impl ExecutionGraph {
                 if let LabelEnum::SendMsg(s) = e {
                     s.val.set_pending();
                 }
+            }
+        }
+
+        // Debug: populate unreplayed_events with all events in the graph,
+        // skipping first events of threads (index 0) and blocked receives/joins.
+        self.unreplayed_events.clear();
+        for thr in self.threads.iter() {
+            for (i, lab) in thr.labels.iter().enumerate() {
+                if i == 0 {
+                    continue;
+                }
+                if let LabelEnum::Block(b) = lab {
+                    match b.btype() {
+                        BlockType::Value(_) | BlockType::Join(_) => continue,
+                        _ => {}
+                    }
+                }
+                self.unreplayed_events.insert(Event::new(thr.tid, i as u32));
             }
         }
     }
@@ -620,8 +650,10 @@ impl ExecutionGraph {
         })
     }
 
-    // Removes recv from the send's readers
-    fn remove_from_readers(&mut self, recv: Event) {
+    // Removes recv from the send's readers.
+    // If deleted_receives is provided and the send has cancelled_recv_readers,
+    // fall back to the last one not in the deleted set instead of setting to None.
+    fn remove_from_readers(&mut self, recv: Event, deleted_receives: &[Event]) {
         let rlab = self.recv_label(recv).unwrap();
         if let Some(old_send) = rlab.rf() {
             let monitors = rlab.monitors(self.send_label(old_send).unwrap());
@@ -630,8 +662,34 @@ impl ExecutionGraph {
                 old_send.remove_monitor_reader(recv)
             }
             if old_send.reader().is_some_and(|r| r == recv) {
-                old_send.set_reader(None);
+                let fallback = old_send.last_cancelled_recv_reader_not_in(deleted_receives);
+                old_send.set_reader(fallback);
             }
+        }
+    }
+
+    /// For all sends whose reader is `recv`, pop the last cancelled_recv_reader
+    /// and set it as the new reader (or None if empty).
+    pub(crate) fn pop_fallback_readers(&mut self, recv: Event) {
+        // println!("In pop fallback readers with receive {}", recv);
+        let send_positions: Vec<Event> = self.threads.iter()
+            .flat_map(|t| t.labels.iter())
+            .filter_map(|lab| {
+                if let LabelEnum::SendMsg(slab) = lab {
+                    if slab.reader().is_some_and(|r| r == recv) {
+                        return Some(slab.pos());
+                    }
+                }
+                None
+            })
+            .collect();
+
+        // println!("Sends affected {:?}", send_positions);
+
+        for spos in send_positions {
+            let slab = self.send_label(spos).unwrap();
+            let fallback = slab.pop_cancelled_recv_reader();
+            self.send_label_mut(spos).unwrap().set_reader(fallback);
         }
     }
 
@@ -640,7 +698,8 @@ impl ExecutionGraph {
         assert!(self.is_recv(recv));
         assert!(send.is_none() || self.is_send(send.unwrap()));
 
-        self.remove_from_readers(recv);
+        self.remove_from_readers(recv, &[]);
+        self.pop_fallback_readers(recv);
 
         // Set recv as a reader of the new send
         if let Some(new_send) = send {
@@ -802,6 +861,8 @@ impl ExecutionGraph {
     }
 
     fn cut_to_view(&mut self, v: &VectorClock) {
+        // println!("Enter cut to view");
+
         let mut deleted: HashSet<Event> = HashSet::new();
         // Flag for fast-path: none has been dropped, nothing to keep track
         let some_dropped = self.dropped_sends() != 0;
@@ -832,6 +893,8 @@ impl ExecutionGraph {
             self.decr_dropped_sends(deleted_dropped);
         }
 
+        // println!("After sends cut to view");
+
         // Recv cache: remove the receives which are not visible in the vector clock
         self.recvs
             .values_mut()
@@ -848,9 +911,29 @@ impl ExecutionGraph {
             }
         }
 
-        for deleted in deleted_receives {
-            self.remove_from_readers(deleted);
+        // For each send, remove deleted receives from its cancelled_recv_readers list.
+        // If any cancelled readers remain, promote the earliest one to be the send's
+        // reader and clear the list, so that replay wakes up the correct receive.
+        // Sends with no cancelled readers keep their current reader; it will be set
+        // to None by remove_from_readers below if that reader was deleted.
+
+        for thread in self.threads.iter_mut() {
+            for lab in thread.labels.iter_mut() {
+                if let LabelEnum::SendMsg(slab) = lab {
+                    slab.remove_from_cancelled_recv_readers(&deleted_receives);
+                    if let Some(first) = slab.first_cancelled_recv_reader() {
+                        slab.set_reader(Some(first));
+                        slab.clear_cancelled_recv_readers();
+                    }
+                }
+            }
         }
+
+        for i in 0..deleted_receives.len() {
+            self.remove_from_readers(deleted_receives[i], &deleted_receives);
+        }
+
+        // println!("After recv cut to view");
 
         // Erase all the threads not found in the vector clock.
         let threads = &mut self.threads;
@@ -859,6 +942,13 @@ impl ExecutionGraph {
             if v.get(t.tid).is_some() {
                 true
             } else {
+                // if let Some(id) = t.task_id {
+                //     tasks.remove(&id);
+                // }
+                // else {
+                //     debug!("[cut_to_view] removing thread {} task_id={:?} num_labels={}", t.tid, t.task_id, t.labels.len());
+                // }
+                debug!("[cut_to_view] removing thread {} task_id={:?} num_labels={}", t.tid, t.task_id, t.labels.len());
                 tasks.remove(&t.task_id.unwrap());
                 false
             }

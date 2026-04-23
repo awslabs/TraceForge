@@ -2,7 +2,8 @@ use crate::cons::Consistency;
 use crate::event::Event;
 use crate::exec_graph::ExecutionGraph;
 use crate::exec_pool::ExecutionPool;
-use crate::loc::Loc;
+use crate::future::PollerMsg;
+use crate::loc::{Loc, WakeMsg};
 use crate::revisit::{Revisit, RevisitEnum};
 use crate::runtime::failure::init_panic_hook;
 use crate::runtime::task::TaskId;
@@ -436,6 +437,7 @@ impl Must {
     /// This function tries to consume the current event (if possible)
     /// and updates the graph with any field that was lost during (de)serialization.
     fn process_event(&mut self, label: LabelEnum) {
+        self.current.graph.unreplayed_events.remove(&label.pos());
         self.try_consume(&label);
         self.recover_lost_data(label);
     }
@@ -458,6 +460,46 @@ impl Must {
             let lab = LabelEnum::RecvMsg(rlab);
             self.current.graph.validate_replay_event(&lab);
             self.process_event(lab);
+
+            // If the send that R reads from has a different reader R', assert that
+            // R' is in a cancelled async receive, then fix up the reader.
+            let g = &mut self.current.graph;
+            let rlab = g.recv_label(pos).unwrap();
+            if let Some(send_pos) = rlab.rf() {
+                let slab = g.send_label(send_pos).unwrap();
+                if let Some(reader) = slab.reader() {
+                    if reader != pos {
+                        // Verify R' is in a cancelled async receive (same check as cons.rs):
+                        // not a PollerMsg/WakeMsg, and a later event on R's thread reads
+                        // from a PollerMsg::Cancel.
+                        assert!(
+                            slab.val.as_any_ref().downcast_ref::<PollerMsg>().is_none()
+                            && slab.val.as_any_ref().downcast_ref::<WakeMsg>().is_none()
+                            && g.get_thr(&reader.thread).labels[(reader.index as usize + 1)..]
+                                .iter()
+                                .any(|lab| {
+                                    if let LabelEnum::RecvMsg(recv) = lab {
+                                        recv.rf().is_some_and(|rf| {
+                                            if let LabelEnum::SendMsg(send) = g.label(rf) {
+                                                send.val.as_any_ref().downcast_ref::<PollerMsg>()
+                                                    .is_some_and(|msg| matches!(msg, PollerMsg::Cancel))
+                                            } else {
+                                                false
+                                            }
+                                        })
+                                    } else {
+                                        false
+                                    }
+                                }),
+                            "Replay: send {} has reader {} but replaying receive {} and reader is not in a cancelled async receive",
+                            send_pos, reader, pos
+                        );
+                        let slab = g.send_label_mut(send_pos).unwrap();
+                        slab.push_cancelled_recv_reader(reader);
+                        slab.set_reader(Some(pos));
+                    }
+                }
+            }
 
             let g = &self.current.graph;
             // Fetch it again, it might have been updated
@@ -482,7 +524,7 @@ impl Must {
         let spos = slab.pos();
         let mut stuck: Vec<Event> = Vec::new();
         if self.is_replay(spos) {
-            info!("| Replay Mode for {}", slab);
+            info!("| Replay Mode for {} with reader {:?}", slab, slab.reader());
             let lab = LabelEnum::SendMsg(slab);
             self.current.graph.validate_replay_event(&lab);
             self.process_event(lab);
@@ -1051,6 +1093,19 @@ impl Must {
     }
 
     fn record_ending_telemetry(&mut self, maybe_block: &Option<BlockType>) -> bool {
+        // Debug: print events that were not replayed during this execution.
+        let unreplayed = &self.current.graph.unreplayed_events;
+        if !unreplayed.is_empty() {
+            let mut sorted: Vec<_> = unreplayed.iter().collect();
+            sorted.sort();
+            debug!("[DEBUG] Unreplayed events ({}):", sorted.len());
+            for ev in &sorted {
+                let label = self.current.graph.label(**ev);
+                debug!("  {} -> {}", ev, label);
+            }
+        } else {
+            debug!("[DEBUG] All events were replayed.");
+        }
         let elapsed = Instant::now() - self.started_at;
         if maybe_block.is_some() {
             if self.is_consistent() {
@@ -1062,6 +1117,7 @@ impl Must {
                 if self.config.verbose >= 2 {
                     println!("One more blocked execution");
                     println!("{}", self.print_graph(None));
+                    println!("Finished printing graph");
                 }
             }
         } else if self.is_consistent() {
@@ -1263,6 +1319,7 @@ impl Must {
 
                 self.current.graph.change_rf(pos, Some(rfs[idx]));
             } else {
+                debug!("Forward revisits at {}: {:?}", pos, rfs);
                 self.current.graph.change_rf(pos, Some(rfs[0]));
                 rfs.iter().skip(1).for_each(|&rf| {
                     push_worklist(
@@ -1351,6 +1408,10 @@ impl Must {
         if self.config.mode == ExplorationMode::Estimation {
             self.pick_revisit(revs, pos);
             return;
+        }
+
+        if !revs.is_empty() {
+            debug!("$$$$$$$ Bacward revisits for send at {}: {:?}", pos, revs);
         }
 
         revs.iter().for_each(|&r| {
@@ -1528,6 +1589,7 @@ impl Must {
 
     pub(crate) fn try_revisit(&mut self) -> bool {
         loop {
+            debug!("Finished execution with current rqueue {:?}", self.current.rqueue.clone());
             if self.current.rqueue.is_empty() {
                 if self.try_pop_state() {
                     continue;
@@ -1537,8 +1599,6 @@ impl Must {
             let rev = { pop_worklist(&mut self.current.rqueue, self.config.schedule_policy == SchedulePolicy::Arbitrary, &mut self.rng) };
             if self.config.verbose >= 3 {
                 println!("Revisit {} <= {}", rev.pos(), rev.rev());
-                println!("Before graph:");
-                println!("{}", self.current.graph);
             }
             if match &rev {
                 RevisitEnum::ForwardRevisit(r) => self.forward_revisit(r),
@@ -1551,9 +1611,11 @@ impl Must {
 
     fn forward_revisit(&mut self, rev: &Revisit) -> bool {
         info!("================ begin forward_revisit ===================");
+        debug!("[forward_revisit] revisit pos={}, rev={}", rev.pos, rev.rev);
         let lab = self.current.graph.label_mut(rev.pos);
         let pos = lab.pos();
         let stamp = lab.stamp();
+        debug!("[forward_revisit] label={}, stamp={}", lab, stamp);
 
         match lab {
             LabelEnum::CToss(ctlab) => ctlab.set_result(!ctlab.result()),
@@ -1590,6 +1652,8 @@ impl Must {
             _ => panic!(),
         };
         self.current.graph.cut_to_stamp(stamp);
+        debug!("After cut");
+        debug!("{}", self.print_graph(None));
         true
     }
 
@@ -1616,14 +1680,21 @@ impl Must {
             rev
         );
         let v = self.current.graph.revisit_view(rev);
-        let ng = self.current.graph.copy_to_view(&v);
-
+        let mut ng = self.current.graph.copy_to_view(&v);
+        // If any send's reader was set to the revisited receive via
+        // cancelled_recv_readers fallback, update it before change_rf.
+        ng.pop_fallback_readers(rev.pos);
+        // println!("After computing the new graph");
         self.push_state();
         self.current.graph = ng;
 
         self.mark_prefix_non_revisitable(rev.rev);
 
+        // println!("After marking prefix");
+
         self.change_rf(rev);
+
+        // println!("After change rf");
 
         if self.config.verbose >= 3 {
             println!("After backward revisit graph");

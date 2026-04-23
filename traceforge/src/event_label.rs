@@ -11,6 +11,7 @@ use crate::msg::Val;
 use crate::thread::main_thread_id;
 use crate::vector_clock::VectorClock;
 use crate::ThreadId;
+use log::{info, trace, debug};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) enum LabelEnum {
@@ -764,6 +765,12 @@ pub(crate) struct SendMsg {
     reader: Option<Event>,
     /// Monitor receives that currently read from this send.
     monitor_readers: Vec<Event>,
+    /// Receives in cancelled asyncs that read from this send.
+    /// Used as fallback when the primary reader is deleted during backward revisits.
+    /// RefCell for interior mutability: populated during filter_available_sends_in_view
+    /// where we only have &SendMsg.
+    #[serde(skip)]
+    cancelled_recv_readers: std::cell::RefCell<Vec<Event>>,
     /// Monitor threads that accept this message,
     /// and the respective value they would observe.
     #[serde(skip)]
@@ -790,6 +797,7 @@ impl SendMsg {
             reader: None,
             monitor_readers: Vec::new(),
             monitor_sends,
+            cancelled_recv_readers: std::cell::RefCell::new(Vec::new()),
         }
     }
 
@@ -894,6 +902,7 @@ impl SendMsg {
     }
 
     pub(crate) fn set_reader(&mut self, reader: Option<Event>) {
+        debug!("Setting reader of {} to {:?}", self.label, reader);
         self.reader = reader
     }
 
@@ -907,6 +916,37 @@ impl SendMsg {
     }
     pub(crate) fn can_be_read_from(&self, reader_loc: &RecvLoc) -> bool {
         self.is_unread() && reader_loc.matches(self)
+    }
+
+    pub(crate) fn push_cancelled_recv_reader(&self, reader: Event) {
+        self.cancelled_recv_readers.borrow_mut().push(reader);
+    }
+
+    pub(crate) fn last_cancelled_recv_reader_not_in(&self, deleted: &[Event]) -> Option<Event> {
+        self.cancelled_recv_readers
+            .borrow()
+            .iter()
+            .rev()
+            .find(|e| !deleted.contains(e))
+            .copied()
+    }
+
+    pub(crate) fn pop_cancelled_recv_reader(&self) -> Option<Event> {
+        self.cancelled_recv_readers.borrow_mut().pop()
+    }
+
+    pub(crate) fn remove_from_cancelled_recv_readers(&self, deleted: &[Event]) {
+        self.cancelled_recv_readers
+            .borrow_mut()
+            .retain(|e| !deleted.contains(e));
+    }
+
+    pub(crate) fn first_cancelled_recv_reader(&self) -> Option<Event> {
+        self.cancelled_recv_readers.borrow().first().copied()
+    }
+
+    pub(crate) fn clear_cancelled_recv_readers(&self) {
+        self.cancelled_recv_readers.borrow_mut().clear();
     }
 
     pub(crate) fn monitor_readers(&self) -> &Vec<Event> {

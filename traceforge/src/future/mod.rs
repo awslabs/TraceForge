@@ -214,35 +214,10 @@ where
             let mut val = crate::Val::new(());
             let mut join_waker: Option<Waker> = None;
 
-            // // Newer version
-            // let message = recv.recv_msg();
-            // loop {
-            //     let poller_message = fut_handles.receiver.recv_msg_block();
-            //     match poller_message {
-            //         PollerMsg::Waker(_) => {
-            //             if message.is_some() {
-            //                 fut_handles.sender.send_msg(PollerMsg::Ready);
-            //                 val = crate::Val::new(message.unwrap());
-            //                 break;
-            //             }
-            //             else {
-            //                 fut_handles.sender.send_msg(PollerMsg::Pending);
-            //             }
-            //         },
-            //         PollerMsg::Cancel => {
-            //             if message.is_some() {
-            //                 crate::assume!(false);
-            //             }
-            //             else {
-            //                 break;
-            //             }
-            //         },
-            //         _ => unreachable!(),
-            //         };
-            // }
-
             // New version
             let mut msg = None;
+            // Tracking if a message on the "real" channel has been received
+            let mut received = false;
             let message1 = fut_handles.receiver.recv_msg_block();
             if let PollerMsg::Waker(waker) = message1 {
                 // Save the waker and inform them it's Pending
@@ -278,6 +253,7 @@ where
                         _ => unreachable!(),
                     }
                 } else {
+                    received = true;
                     // We did the receive, call the waker.
                     match message2.as_any().downcast::<T>() {
                         Ok(result) => {
@@ -298,7 +274,10 @@ where
                             val = crate::Val::new(msg.unwrap());
                         },
                         PollerMsg::Cancel => {
-                            from_receiver(recv).send_msg(msg.unwrap());
+                            // block because we were cancelled after receiving a message on the "real" channel
+                            if (received) {
+                                crate::assume!(false);
+                            }
                         },
                         _ => unreachable!(),
                     };

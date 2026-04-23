@@ -915,6 +915,9 @@ fn no_await() {
 }
 
 pub use tokio::time::{Duration, Instant};
+use traceforge::named_nondet;
+use std::collections::HashMap;
+use traceforge::sync::mpsc::unbounded_mpsc_select;
 
 pub struct Interval {
     period: Duration,
@@ -925,9 +928,9 @@ impl Interval {
     pub async fn tick(&mut self) {
         if self.ticks_remaining > 0 {
             self.ticks_remaining -= 1;
-
+            let decision = named_nondet(&"interval".to_string());
             std::future::poll_fn(|_cx| {
-                if <bool>::nondet() {
+                if decision {
                     std::task::Poll::Ready(())
                 } else {
                     std::task::Poll::Pending
@@ -943,6 +946,16 @@ impl Interval {
         }
     }
 
+    pub async fn tick_bool(&mut self) -> bool {
+        if self.ticks_remaining > 0 {
+            self.ticks_remaining -= 1;
+            named_nondet(&"interval".to_string())
+        } else {
+            false
+        }
+    }
+    
+
     pub fn reset(&mut self) {}
 
     pub fn reset_immediately(&mut self) {}
@@ -952,45 +965,60 @@ impl Interval {
     }
 }
 
-pub fn interval(period: Duration) -> Interval {
+pub fn interval(period: Duration, ticks: usize) -> Interval {
     Interval {
         period,
-        ticks_remaining: 1,
+        ticks_remaining: ticks,
     }
 }
 
-pub fn interval_at(_start: tokio::time::Instant, period: Duration) -> Interval {
-    interval(period)
-}
 
 #[test]
 fn cancel_recv_macro_select() {
-    for _ in 0..10 {
+    for _ in 0..1 {
+        let mut choices = HashMap::new();
+        choices.insert("interval".to_string(),true);
         let stats = traceforge::verify(
             Config::builder()
-                .with_verbose(0)
+                .with_verbose(2)
                 .with_policy(SchedulePolicy::Arbitrary)
+                .with_predetermined_global_choices(choices)
                 .build(),
             || {
                 future::block_on(async {
                     let (sender1, receiver1) = traceforge::sync::mpsc::unbounded_channel::<u32>();
+                    let (sender2, receiver2) = traceforge::sync::mpsc::unbounded_channel::<u32>();
 
-                    let mut wait_interval: Interval = interval_at(Instant::now(), Duration::from_millis(500));
+                    let mut wait_interval: Interval = interval(Duration::from_millis(500), 2);
 
                     thread::spawn(move || {
-                        let _ = sender1.send(1);
+                        let _ = sender1.send(11);
+                        let _ = sender1.send(12);
+                    });
+
+                    thread::spawn(move || {
+                        let _ = sender2.send(21);
+                        let _ = sender2.send(22);
                     });
 
                     loop {
+                        traceforge::send_msg(traceforge::thread::construct_thread_id(0),format!("New loop iteration").to_string());
                         tokio::select! { 
                             biased;   
                             _ = wait_interval.tick() => {
                                 traceforge::send_msg(traceforge::thread::construct_thread_id(0),format!("timer ticked").to_string());
-                                0u32
                             },                                                                                                                                                               
-                            val = receiver1.recv() => {
-                                traceforge::send_msg(traceforge::thread::construct_thread_id(0),format!("val received").to_string());
-                                val.expect("this should have something")
+                            __tf_result = async {
+                                    unbounded_mpsc_select(&receiver1, &receiver2)
+                                } => {
+                                    let (__tf_val, __tf_idx) = __tf_result;
+                                    if __tf_idx == 0 {
+                                        let msg = Some(*__tf_val.as_any().downcast::<u32>().unwrap());
+                                        traceforge::send_msg(traceforge::thread::construct_thread_id(0),format!("val {:?} received on channel 1", msg).to_string());
+                                    } else {
+                                        let msg = Some(*__tf_val.as_any().downcast::<u32>().unwrap());
+                                        traceforge::send_msg(traceforge::thread::construct_thread_id(0),format!("val {:?} received on channel 2", msg).to_string());
+                                    };
                             },                                                                                                                                                              
                         };
                     }
@@ -999,5 +1027,221 @@ fn cancel_recv_macro_select() {
         );
         assert_eq!(stats.execs, 0);
         assert_eq!(stats.block, 6);
+    }
+}
+
+#[test]
+fn recv_macro_select1() {
+    for _ in 0..1 {
+        let mut choices = HashMap::new();
+        choices.insert(
+            "interval".to_string(),
+            vec![
+                vec![true, false, true], 
+            ],
+        );
+        let stats = traceforge::verify(
+            Config::builder()
+                .with_verbose(2)
+                .with_policy(SchedulePolicy::Arbitrary)
+                .with_predetermined_choices(choices)
+                .build(),
+            || {
+                future::block_on(async {
+                    let (sender1, receiver1) = traceforge::sync::mpsc::unbounded_channel::<u32>();
+                    let (sender2, receiver2) = traceforge::sync::mpsc::unbounded_channel::<u32>();
+
+                    let mut wait_interval: Interval = interval(Duration::from_millis(500), 3);
+
+                    thread::spawn(move || {
+                        let _ = sender1.send(11);
+                        let _ = sender1.send(12);
+                    });
+
+                    thread::spawn(move || {
+                        let _ = sender2.send(21);
+                        let _ = sender2.send(22);
+                    });
+
+                    loop {
+                        traceforge::send_msg(traceforge::thread::construct_thread_id(0),format!("New loop iteration").to_string());
+                        tokio::select! { 
+                            biased;   
+                            _ = wait_interval.tick() => {
+                                traceforge::send_msg(traceforge::thread::construct_thread_id(0),format!("timer ticked").to_string());
+                            },                                                                                                                                                               
+                            __tf_result = async {
+                                    unbounded_mpsc_select(&receiver1, &receiver2)
+                                } => {
+                                    let (__tf_val, __tf_idx) = __tf_result;
+                                    if __tf_idx == 0 {
+                                        let msg = Some(*__tf_val.as_any().downcast::<u32>().unwrap());
+                                        traceforge::send_msg(traceforge::thread::construct_thread_id(0),format!("val {:?} received on channel 1", msg).to_string());
+                                    } else {
+                                        let msg = Some(*__tf_val.as_any().downcast::<u32>().unwrap());
+                                        traceforge::send_msg(traceforge::thread::construct_thread_id(0),format!("val {:?} received on channel 2", msg).to_string());
+                                    };
+                            },                                                                                                                                                              
+                        };
+                    }
+                });
+            },
+        );
+        assert_eq!(stats.execs, 0);
+        assert_eq!(stats.block, 7);
+    }
+}
+
+#[test]
+fn recv_macro_select2() {
+    for _ in 0..1 {
+        let mut choices = HashMap::new();
+        choices.insert(
+            "interval".to_string(),
+            vec![
+                vec![true, false, true, false, false, false], 
+            ],
+        );
+        let stats = traceforge::verify(
+            Config::builder()
+                .with_verbose(2)
+                .with_policy(SchedulePolicy::Arbitrary)
+                .with_predetermined_choices(choices)
+                .build(),
+            || {
+                future::block_on(async {
+                    let (sender1, receiver1) = traceforge::sync::mpsc::unbounded_channel::<u32>();
+                    let (sender2, receiver2) = traceforge::sync::mpsc::unbounded_channel::<u32>();
+
+                    let mut wait_interval: Interval = interval(Duration::from_millis(500), 3);
+
+                    thread::spawn(move || {
+                        let _ = sender1.send(11);
+                        let _ = sender1.send(12);
+                    });
+
+                    thread::spawn(move || {
+                        let _ = sender2.send(21);
+                    });
+
+                    loop {
+                        traceforge::send_msg(traceforge::thread::construct_thread_id(0),format!("New loop iteration").to_string());
+                        let silence = named_nondet(&"interval".to_string());
+                        if silence {
+                            traceforge::send_msg(traceforge::thread::construct_thread_id(0),format!("timer ticked").to_string());
+                        } else {                                                                                                                                                               
+                            let __tf_result = unbounded_mpsc_select(&receiver1, &receiver2);
+                            let (__tf_val, __tf_idx) = __tf_result;
+                            if __tf_idx == 0 {
+                                let msg = Some(*__tf_val.as_any().downcast::<u32>().unwrap());
+                                traceforge::send_msg(traceforge::thread::construct_thread_id(0),format!("val {:?} received on channel 1", msg).to_string());
+                            } else {
+                                let msg = Some(*__tf_val.as_any().downcast::<u32>().unwrap());
+                                traceforge::send_msg(traceforge::thread::construct_thread_id(0),format!("val {:?} received on channel 2", msg).to_string());
+                            };                                                                                                                                                           
+                        };
+                    }
+                });
+            },
+        );
+        assert_eq!(stats.execs, 0);
+        assert_eq!(stats.block, 6);
+    }
+}
+
+use crate::utils::init_log;
+
+#[test]
+fn cancel_recv_select() {
+    for _ in 0..1 {
+        // init_log();
+        let mut choices = HashMap::new();
+        choices.insert(
+            "interval".to_string(),
+            vec![
+                vec![true, false, false, false, false, false], 
+                vec![true, false, false, false, false, false], 
+            ],
+        );
+        let stats = traceforge::verify(
+            Config::builder()
+                .with_verbose(0)
+                .with_policy(SchedulePolicy::Arbitrary)
+                .with_predetermined_choices(choices)
+                .build(),
+            || {
+                let (sender1, receiver1) = traceforge::sync::mpsc::unbounded_channel::<u32>();
+                let (sender2, receiver2) = traceforge::sync::mpsc::unbounded_channel::<u32>();
+
+                let (sender3, receiver3) = traceforge::sync::mpsc::unbounded_channel::<u32>();
+                let (sender4, receiver4) = traceforge::sync::mpsc::unbounded_channel::<u32>();
+
+                thread::spawn(move || {
+                    let _ = sender1.send(11);
+                    let _ = sender1.send(12);
+                });
+
+                thread::spawn(move || {
+                    let _ = sender2.send(21);
+                    let _ = sender2.send(22);
+                });
+
+                thread::spawn(move || {
+                    let _ = sender3.send(31);
+                    let _ = sender3.send(32);
+                });
+
+                thread::spawn(move || {
+                    let _ = sender4.send(41);
+                    let _ = sender4.send(42);
+                });
+
+                thread::spawn(move || { 
+                    future::block_on(async {
+                        let mut wait_interval: Interval = interval(Duration::from_millis(500), 3);
+
+                        loop {
+                            traceforge::send_msg(traceforge::thread::construct_thread_id(0),format!("New loop iteration").to_string());
+                            tokio::select! { 
+                                biased;   
+                                _ = wait_interval.tick() => {
+                                    traceforge::send_msg(traceforge::thread::construct_thread_id(0),format!("timer ticked").to_string());
+                                },                                                                                                                                                               
+                                msg = receiver1.recv() => {
+                                    traceforge::send_msg(traceforge::thread::construct_thread_id(0),format!("val {:?} received on channel 1", msg).to_string());
+                                },                                                                                                                                                              
+                                msg = receiver2.recv() => {
+                                    traceforge::send_msg(traceforge::thread::construct_thread_id(0),format!("val {:?} received on channel 2", msg).to_string());
+                                },                                                                                                                                                              
+                            };
+                        };
+                    });
+                });
+                thread::spawn(move || { 
+                    future::block_on(async {
+                        let mut wait_interval: Interval = interval(Duration::from_millis(500), 3);
+
+                        loop {
+                            traceforge::send_msg(traceforge::thread::construct_thread_id(0),format!("New loop iteration").to_string());
+                            tokio::select! { 
+                                biased;   
+                                _ = wait_interval.tick() => {
+                                    traceforge::send_msg(traceforge::thread::construct_thread_id(0),format!("timer ticked").to_string());
+                                },                                                                                                                                                               
+                                msg = receiver3.recv() => {
+                                    traceforge::send_msg(traceforge::thread::construct_thread_id(0),format!("val {:?} received on channel 3", msg).to_string());
+                                },                                                                                                                                                              
+                                msg = receiver4.recv() => {
+                                    traceforge::send_msg(traceforge::thread::construct_thread_id(0),format!("val {:?} received on channel 4", msg).to_string());
+                                },                                                                                                                                                              
+                            };
+                        };
+                    });
+                });
+            },
+        );
+        println!("Number of execs: {} completed and {} blocked", stats.execs, stats.block);
+        assert_eq!(stats.execs, 0);
+        assert_eq!(stats.block, 13);
     }
 }
