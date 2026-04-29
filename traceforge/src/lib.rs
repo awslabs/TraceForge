@@ -27,6 +27,7 @@ mod testmode;
 use future::spawn_receive;
 pub use testmode::{parallel_test, test};
 
+pub mod symbolic;
 pub mod thread;
 mod vector_clock;
 
@@ -208,6 +209,8 @@ pub struct Config {
     pub(crate) predetermined_choices: HashMap<String, Vec<Vec<bool>>>,
     #[serde(skip)]
     pub(crate) callbacks: Arc<Mutex<Vec<Box<dyn ExecutionObserver + Send>>>>,
+
+    pub(crate) symbolic: bool,
 }
 
 impl Config {
@@ -269,6 +272,7 @@ impl ConfigBuilder {
             keep_per_execution_coverage: false,
             predetermined_choices: HashMap::new(),
             callbacks: Arc::new(Mutex::new(Vec::new())),
+            symbolic: false,
         })
     }
 
@@ -277,6 +281,9 @@ impl ConfigBuilder {
     fn check_valid(self) -> Self {
         if self.0.symmetry {
             panic!("Symmetry reduction is currently not supported")
+        }
+        if self.0.symbolic && self.0.parallel {
+            panic!("Symbolic/Condpor is not supported with parallel exploration yet");
         }
         if self.0.symmetry && self.0.schedule_policy == SchedulePolicy::Arbitrary {
             eprintln!("Symmetry reduction can only be used with LTR!");
@@ -486,6 +493,12 @@ impl ConfigBuilder {
     /// ```
     pub fn with_predetermined_choices(mut self, choices: HashMap<String, Vec<Vec<bool>>>) -> Self {
         self.0.predetermined_choices = choices;
+        self
+    }
+
+    /// Enables the symbolic (concolic) support (as in `condpor`).
+    pub fn with_symbolic(mut self, enabled: bool) -> Self {
+        self.0.symbolic = enabled;
         self
     }
 
@@ -788,9 +801,13 @@ where
     T: Message + 'static,
 {
     let locs = recvs.map(|r| &r.inner);
-    recv_msg_with_tag(locs, comm, Some(PredicateType(Arc::new(move |tid, tag| {
-        f(tid, normalize_vec_tag(tag))
-    }))))
+    recv_msg_with_tag(
+        locs,
+        comm,
+        Some(PredicateType(Arc::new(move |tid, tag| {
+            f(tid, normalize_vec_tag(tag))
+        }))),
+    )
 }
 
 pub fn select_msg_block<'a, T: Message + 'static>(
@@ -826,9 +843,13 @@ where
     T: Message + 'static,
 {
     let locs = recvs.map(|r| &r.inner);
-    recv_msg_block_with_tag(locs, comm, Some(PredicateType(Arc::new(move |tid, tag| {
-        f(tid, normalize_vec_tag(tag))
-    }))))
+    recv_msg_block_with_tag(
+        locs,
+        comm,
+        Some(PredicateType(Arc::new(move |tid, tag| {
+            f(tid, normalize_vec_tag(tag))
+        }))),
+    )
 }
 
 // Main API
