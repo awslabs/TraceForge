@@ -262,7 +262,7 @@ impl LabelEnum {
             }
             LabelEnum::ConstraintEval(s) => {
                 if let LabelEnum::ConstraintEval(o) = other {
-                    if s.expr != o.expr || s.kind != o.kind {
+                    if s.expr != o.expr {
                         return Err("symbolic constraint mismatch".into());
                     }
                     return Ok(());
@@ -1241,35 +1241,24 @@ impl fmt::Display for SymbolicVar {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum ConstraintKind {
-    Branch,
-}
-
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct ConstraintEval {
     label: EventLabel,
     expr: SymExpr,
-    kind: ConstraintKind,
     branch_taken: bool,
 }
 
 impl ConstraintEval {
-    pub(crate) fn new(pos: Event, expr: SymExpr, kind: ConstraintKind, branch_taken: bool) -> Self {
+    pub(crate) fn new(pos: Event, expr: SymExpr, branch_taken: bool) -> Self {
         Self {
             label: EventLabel::new(pos),
             expr,
-            kind,
             branch_taken,
         }
     }
 
     pub(crate) fn expr(&self) -> &SymExpr {
         &self.expr
-    }
-
-    pub(crate) fn kind(&self) -> ConstraintKind {
-        self.kind.clone()
     }
 
     pub(crate) fn branch_taken(&self) -> bool {
@@ -1287,9 +1276,8 @@ impl fmt::Display for ConstraintEval {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}: C-{:?} {:?} [{}]",
+            "{}: C {:?} [{}]",
             self.as_event_label(),
-            self.kind(),
             self.expr(),
             if self.branch_taken() { "true" } else { "false" }
         )

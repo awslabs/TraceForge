@@ -4,7 +4,7 @@ mod solver;
 pub use expr::*;
 pub(crate) use solver::SymbolicSolver;
 
-use crate::event_label::{ConstraintEval, ConstraintKind, SymbolicVar};
+use crate::event_label::{ConstraintEval, SymbolicVar};
 use crate::runtime::execution::ExecutionState;
 
 pub fn fresh_int() -> SymExpr {
@@ -38,7 +38,7 @@ pub fn fresh_bool() -> SymExpr {
 pub fn eval(sym_expr: SymExpr) -> bool {
     ExecutionState::with(|s| {
         let pos = s.next_pos();
-        let lab = ConstraintEval::new(pos, sym_expr, ConstraintKind::Branch, true);
+        let lab = ConstraintEval::new(pos, sym_expr, true);
         s.must.borrow_mut().handle_constraint_eval(lab)
     })
 }

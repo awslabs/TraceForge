@@ -759,18 +759,16 @@ impl Must {
     }
 
     pub(crate) fn handle_constraint_eval(&mut self, mut lab: ConstraintEval) -> bool {
-        let pos = lab.pos();
+        if self.is_replay(lab.pos()) {
+            let pos = lab.pos();
 
-        if self.is_replay(pos) {
             let stored = match self.current.graph.label(pos).clone() {
                 LabelEnum::ConstraintEval(c) => c,
                 other => panic!("expected constraint at {}, got {}", pos, other),
             };
 
-            self.current
-                .graph
-                .validate_replay_event(&LabelEnum::ConstraintEval(lab));
-
+            let lab = LabelEnum::ConstraintEval(lab.clone());
+            self.current.graph.validate_replay_event(&lab);
             self.process_event(LabelEnum::ConstraintEval(stored.clone()));
             self.add_constraint_to_path_solver(&stored);
             return stored.branch_taken();
@@ -847,10 +845,6 @@ impl Must {
     }
 
     fn is_maximal_constraint(&self, c: &ConstraintEval, rev: &Revisit) -> bool {
-        if c.kind() != ConstraintKind::Branch {
-            return true;
-        }
-
         let view = self.current.graph.revisit_view(rev);
         let mut g = self.current.graph.copy_to_view(&view);
         g.change_rf(rev.pos, Some(rev.rev));
@@ -1577,7 +1571,6 @@ impl Must {
                 self.current.graph.incr_dropped_sends();
             }
             LabelEnum::ConstraintEval(c) => {
-                assert_eq!(c.kind(), ConstraintKind::Branch);
                 c.set_branch_taken(!c.branch_taken());
             }
             _ => panic!(),
