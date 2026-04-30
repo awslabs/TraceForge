@@ -24,7 +24,7 @@ fn example() {
     let x2: symbolic::SymExpr = recv_msg_block();
 
     assert_eq!(x1, x2);
-    symbolic::assert(x1.eq(x2));
+    symbolic::assert(x1.equals(x2));
 
     worker1.join().unwrap();
     worker2.join().unwrap();

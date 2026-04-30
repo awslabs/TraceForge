@@ -48,7 +48,7 @@ impl SymExpr {
         SymExpr::Implies(Box::new(self), Box::new(other.into()))
     }
 
-    pub fn eq(self, other: impl Into<SymExpr>) -> Self {
+    pub fn equals(self, other: impl Into<SymExpr>) -> Self {
         SymExpr::Eq(Box::new(self), Box::new(other.into()))
     }
 
@@ -72,7 +72,7 @@ impl SymExpr {
         SymExpr::Sub(Box::new(self), Box::new(other.into()))
     }
 
-    pub fn mult(self, other: impl Into<SymExpr>) -> Self {
+    pub fn mul(self, other: impl Into<SymExpr>) -> Self {
         SymExpr::Mul(Box::new(self), Box::new(other.into()))
     }
 

@@ -70,7 +70,7 @@ fn symbolic_echo_transports_formula() {
         let x2: symbolic::SymExpr = recv_msg_block();
 
         assert_eq!(x1, x2);
-        symbolic::assert(x1.eq(x2));
+        symbolic::assert(x1.equals(x2));
 
         worker1.join().unwrap();
         worker2.join().unwrap();
@@ -90,7 +90,7 @@ fn symbolic_expr_supports_arithmetic_and_boolean_helpers() {
             .ge(4)
             .and(y.clone().le(10))
             .and(((x.clone() * 2) - 1).lt(y.clone().div(2) + 20))
-            .and(x.clone().sub(1).mult(3).ge(0))
+            .and(x.clone().sub(1).mul(3).ge(0))
             .implies((y / 2).ge(x % 3));
 
         symbolic::assume(guard);
@@ -106,7 +106,7 @@ fn symbolic_forward_revisit_explores_both_branch_outcomes() {
 
         let worker = thread::spawn(move || {
             let v: symbolic::SymExpr = recv_msg_block();
-            let even = symbolic::eval((v % 2).eq(symbolic::int_val(0)));
+            let even = symbolic::eval((v % 2).equals(symbolic::int_val(0)));
             send_msg(main_id, even);
         });
 
@@ -115,7 +115,7 @@ fn symbolic_forward_revisit_explores_both_branch_outcomes() {
 
         let even: bool = recv_msg_block();
         if even {
-            symbolic::assert((i % 2).eq(symbolic::int_val(0)));
+            symbolic::assert((i % 2).equals(symbolic::int_val(0)));
         }
 
         worker.join().unwrap();
@@ -142,7 +142,7 @@ fn buggy_control_flow_program() {
 
     let positive: bool = recv_msg_block();
     if positive {
-        symbolic::assert((i % 2).eq(symbolic::int_val(0)));
+        symbolic::assert((i % 2).equals(symbolic::int_val(0)));
     }
 
     worker.join().unwrap();
@@ -186,7 +186,7 @@ fn symbolic_receive_order_revisit_can_expose_order_sensitive_bug() {
         let first: symbolic::SymExpr = recv_msg_block();
         let second: symbolic::SymExpr = recv_msg_block();
 
-        symbolic::assert(second.eq(first + 1));
+        symbolic::assert(second.equals(first + 1));
 
         worker1.join().unwrap();
         worker2.join().unwrap();
