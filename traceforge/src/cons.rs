@@ -192,9 +192,10 @@ impl Consistency {
         check_concurrent: bool,
     ) -> Vec<Event> {
         // Sends that the receive can read from
-        let sends = g.matching_stores(recv.recv_loc())
+        let sends = g
+            .matching_stores(recv.recv_loc())
             // filter-out WakeMsg in our porf prefix: the respective futures were cancelled
-            .filter(|&s| {!s.is_cancelled_wrt(recv.as_event_label())});
+            .filter(|&s| !s.is_cancelled_wrt(recv.as_event_label()));
 
         // Keep those that will exist and be unread after the revisit, checking
         // for concurrent receives.
