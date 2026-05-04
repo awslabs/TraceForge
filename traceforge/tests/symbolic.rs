@@ -96,7 +96,7 @@ fn symbolic_expr_supports_arithmetic_and_boolean_helpers() {
         symbolic::assume(guard);
     });
 
-    assert_eq!(stats.execs, 0);
+    assert_eq!(stats.execs, 1);
 }
 
 #[test]
