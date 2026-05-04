@@ -778,9 +778,10 @@ impl Must {
         let false_sat = self.symbolic_solver.sat_with_not(lab.expr());
 
         if !true_sat && !false_sat {
-            self.add_to_graph(LabelEnum::ConstraintEval(lab));
-            self.stop();
-            return false;
+            panic!(
+                "both a constraint and its negation are unsatisfiable for {:?}",
+                lab.expr()
+            );
         }
 
         let chosen = true_sat;
