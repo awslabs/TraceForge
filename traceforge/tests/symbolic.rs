@@ -96,7 +96,18 @@ fn symbolic_expr_supports_arithmetic_and_boolean_helpers() {
         symbolic::assume(guard);
     });
 
-    assert!(stats.execs > 0);
+    assert_eq!(stats.execs, 0);
+}
+
+#[test]
+fn symbolic_assume_unsatisfiable_blocks_execution() {
+    let stats = verify(symbolic_config(), || {
+        let x = symbolic::fresh_int();
+        symbolic::assume(x.clone().gt(0).and(x.lt(0)));
+    });
+
+    assert_eq!(stats.execs, 0);
+    assert_eq!(stats.block, 1);
 }
 
 #[test]
