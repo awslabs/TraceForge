@@ -11,7 +11,7 @@ use crate::msg::Val;
 use crate::thread::main_thread_id;
 use crate::vector_clock::VectorClock;
 use crate::ThreadId;
-use log::{info, trace, debug};
+use log::debug;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) enum LabelEnum {
@@ -1033,6 +1033,7 @@ pub(crate) struct CToss {
     result: bool,
     predetermined: bool,
     maximal: bool,
+    name: Option<String>,
 }
 
 impl CToss {
@@ -1042,7 +1043,13 @@ impl CToss {
             result: init_value,
             predetermined: false,
             maximal: init_value,
+            name: None,
         }
+    }
+
+    pub(crate) fn with_name(mut self, name: String) -> Self {
+        self.name = Some(name);
+        self
     }
 
     pub(crate) fn result(&self) -> bool {
@@ -1070,7 +1077,11 @@ as_label!(CToss);
 
 impl fmt::Display for CToss {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: NONDET {}", self.as_event_label(), self.result())
+        if let Some(ref name) = self.name {
+            write!(f, "{}: NONDET({}) {}", self.as_event_label(), name, self.result())
+        } else {
+            write!(f, "{}: NONDET {}", self.as_event_label(), self.result())
+        }
     }
 }
 

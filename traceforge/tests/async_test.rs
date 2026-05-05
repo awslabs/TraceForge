@@ -11,7 +11,6 @@ use traceforge::{cover, future, nondet, recv_msg_block, send_msg, thread, Config
 use futures::future::{join_all, pending, select, select_all, Either};
 use futures::prelude::*;
 use futures::stream::FuturesUnordered;
-use traceforge::TypeNondet;
 
 const TEST_RUNS: i32 = 20;
 
@@ -1107,8 +1106,6 @@ fn recv_macro_select2() {
                 future::block_on(async {
                     let (sender1, receiver1) = traceforge::sync::mpsc::unbounded_channel::<u32>();
                     let (sender2, receiver2) = traceforge::sync::mpsc::unbounded_channel::<u32>();
-
-                    let mut wait_interval: Interval = interval(Duration::from_millis(500), 3);
 
                     thread::spawn(move || {
                         let _ = sender1.send(11);

@@ -13,7 +13,7 @@ use crate::thread::{construct_thread_id, main_thread_id};
 use crate::vector_clock::VectorClock;
 use crate::{event_label::*, Val};
 use crate::{replay as REPLAY, ThreadId};
-use log::{info, trace, debug};
+use log::debug;
 
 /// Encapsulates the execution information about a single thread
 #[derive(Clone, Debug, Serialize, Deserialize)]

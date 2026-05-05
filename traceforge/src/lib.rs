@@ -1194,12 +1194,12 @@ pub fn named_nondet(name: &str) -> bool {
         if must.config.predetermined_global_choices.contains_key(name) {
             if let Some(&value) = must.global_named_choices.get(name) {
                 // Already resolved — reuse cached value
-                return must.handle_ctoss_predetermined(CToss::new(pos, value), value);
+                return must.handle_ctoss_predetermined(CToss::new(pos, value).with_name(name.to_string()), value);
             }
             // First call — use the predetermined global value and cache it
             let value = must.config.predetermined_global_choices[name];
             must.global_named_choices.insert(name.to_string(), value);
-            return must.handle_ctoss_predetermined(CToss::new(pos, value), value);
+            return must.handle_ctoss_predetermined(CToss::new(pos, value).with_name(name.to_string()), value);
         }
 
         // Use the thread's filtered_origination_vec as the map key instead of ThreadId.
@@ -1302,7 +1302,7 @@ pub fn named_nondet(name: &str) -> bool {
                 value, name, thread_idx, current_occurrence
             );
             // Use handle_ctoss_predetermined which now handles both replay and handle modes
-            return must.handle_ctoss_predetermined(CToss::new(pos, value), value);
+            return must.handle_ctoss_predetermined(CToss::new(pos, value).with_name(name.to_string()), value);
         }
 
         // Fallback to nondeterministic exploration (handles both replay and handle modes)
@@ -1344,7 +1344,7 @@ pub fn named_nondet(name: &str) -> bool {
         // Release the mutable borrow so gen_bool() and handle_ctoss() can each borrow independently.
         drop(must);
         let toss = s.must.borrow_mut().gen_bool();
-        s.must.borrow_mut().handle_ctoss(CToss::new(pos, toss))
+        s.must.borrow_mut().handle_ctoss(CToss::new(pos, toss).with_name(name.to_string()))
     })
 }
 	 

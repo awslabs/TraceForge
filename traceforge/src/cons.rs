@@ -6,7 +6,7 @@ use crate::loc::CommunicationModel;
 use crate::revisit::Revisit;
 use crate::vector_clock::VectorClock;
 use crate::loc::WakeMsg;
-use log::{info, trace, debug};
+use log::debug;
 
 // A generic consistency which will, eventually, support arbitrary
 // communication models, depending on the channel.

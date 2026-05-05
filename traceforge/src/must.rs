@@ -469,11 +469,14 @@ impl Must {
                 let slab = g.send_label(send_pos).unwrap();
                 if let Some(reader) = slab.reader() {
                     if reader != pos {
-                        // Verify R' is in a cancelled async receive (same check as cons.rs):
+                        // Verify R' is in a cancelled async receive (same check as cons.rs),
+                        // OR that the mismatch is due to monitor message tracking.
                         // not a PollerMsg/WakeMsg, and a later event on R's thread reads
                         // from a PollerMsg::Cancel.
                         assert!(
-                            slab.val.as_any_ref().downcast_ref::<PollerMsg>().is_none()
+                            slab.is_monitored_from(&pos.thread)
+                            || slab.is_monitored_from(&reader.thread)
+                            || (slab.val.as_any_ref().downcast_ref::<PollerMsg>().is_none()
                             && slab.val.as_any_ref().downcast_ref::<WakeMsg>().is_none()
                             && g.get_thr(&reader.thread).labels[(reader.index as usize + 1)..]
                                 .iter()
@@ -490,13 +493,22 @@ impl Must {
                                     } else {
                                         false
                                     }
-                                }),
+                                })),
                             "Replay: send {} has reader {} but replaying receive {} and reader is not in a cancelled async receive",
                             send_pos, reader, pos
                         );
                         let slab = g.send_label_mut(send_pos).unwrap();
-                        slab.push_cancelled_recv_reader(reader);
-                        slab.set_reader(Some(pos));
+                        if slab.is_monitored_from(&pos.thread) {
+                            // Monitor is replaying its receive; add as monitor reader
+                            slab.add_monitor_reader(pos);
+                        } else if slab.is_monitored_from(&reader.thread) {
+                            // Existing reader is a monitor; move it to monitor readers
+                            slab.add_monitor_reader(reader);
+                            slab.set_reader(Some(pos));
+                        } else {
+                            slab.push_cancelled_recv_reader(reader);
+                            slab.set_reader(Some(pos));
+                        }
                     }
                 }
             }
@@ -591,38 +603,6 @@ impl Must {
     /// Returns the filtered_origination_vec for the given thread.
     pub(crate) fn thread_filtered_origination_vec_from_tid(&self, tid: ThreadId) -> Vec<u32> {
         self.current.graph.get_thread_tclab(tid).filtered_origination_vec()
-    }
-
-    /// Returns a filtered origination_vec for the given thread.
-    ///
-    /// Unlike the standard origination_vec which uses event indices (pos.index),
-    /// this version counts only thread creation events whose names don't contain
-    /// the filter pattern (defined by FILTERED_THREAD_NAME_PATTERN).
-    ///
-    /// This provides more stable indexing across executions when internal framework
-    /// threads (like those named "traceforge") may vary in timing but application
-    /// threads follow a consistent spawn pattern.
-    pub(crate) fn thread_filtered_origination_vec(&self, tid: ThreadId, filter_pattern: &str) -> Vec<u32> {
-        let origination_vec = self.current.graph.get_thread_tclab(tid).origination_vec();
-        let mut filtered_vec = Vec::new();
-
-        // Walk through the origination_vec, which represents the spawn lineage
-        let mut current_thread = crate::thread::main_thread_id();
-
-        for &event_idx in &origination_vec {
-            // Count TCreate events in current_thread up to and including event_idx
-            // that don't have the filter pattern in their name
-            let count = self.count_filtered_tcreate_events(current_thread, event_idx, filter_pattern);
-            filtered_vec.push(count);
-
-            // Move to the spawned thread for the next iteration
-            let spawn_event = Event::new(current_thread, event_idx);
-            if let LabelEnum::TCreate(tclab) = self.current.graph.label(spawn_event) {
-                current_thread = tclab.cid();
-            }
-        }
-
-        filtered_vec
     }
 
     /// Counts the number of TCreate events in the given thread up to and including

@@ -7,12 +7,11 @@
 //!
 //! [`futures::executor`]: https://docs.rs/futures/0.3.30/futures/executor/index.html
 
-use crate::channel::{from_receiver, Builder, Receiver, Sender};
+use crate::channel::{Builder, Receiver, Sender};
 use crate::loc::WakeMsg;
 use crate::msg::Message;
 use crate::runtime::execution::ExecutionState;
 use crate::runtime::task::{TaskId};
-use crate::thread::{ThreadId};
 
 
 
@@ -212,16 +211,12 @@ where
     let task_id = ExecutionState::spawn_thread(
         move || {
             let mut val = crate::Val::new(());
-            let mut join_waker: Option<Waker> = None;
-
-            // New version
-            let mut msg = None;
-            // Tracking if a message on the "real" channel has been received
-            let mut received = false;
+            let msg;
+    
             let message1 = fut_handles.receiver.recv_msg_block();
             if let PollerMsg::Waker(waker) = message1 {
                 // Save the waker and inform them it's Pending
-                join_waker = Some(waker.clone());
+                let join_waker = Some(waker.clone());
                 fut_handles.sender.send_msg(PollerMsg::Pending);
 
                 let (message2, ind) = crate::select_val_block(&fut_handles.receiver, &recv);
@@ -234,18 +229,18 @@ where
                                 PollerMsg::Waker(_) => {
                                     fut_handles.sender.send_msg(PollerMsg::Pending);
                                     // if we return Pending we may need to return Pending again
-                                    // loop {
-                                    //     let message_n = fut_handles.receiver.recv_msg_block();
-                                    //     match message_n {
-                                    //         PollerMsg::Waker(_) => {
-                                    //             fut_handles.sender.send_msg(PollerMsg::Pending);
-                                    //         },
-                                    //         PollerMsg::Cancel => {
-                                    //             break;
-                                    //         },
-                                    //         _ => unreachable!(),
-                                    //     }
-                                    // }
+                                    loop {
+                                        let message_n = fut_handles.receiver.recv_msg_block();
+                                        match message_n {
+                                            PollerMsg::Waker(_) => {
+                                                fut_handles.sender.send_msg(PollerMsg::Pending);
+                                            },
+                                            PollerMsg::Cancel => {
+                                                break;
+                                            },
+                                            _ => unreachable!(),
+                                        }
+                                    }
                                 },
                                 _ => {},
                             }
@@ -253,7 +248,6 @@ where
                         _ => unreachable!(),
                     }
                 } else {
-                    received = true;
                     // We did the receive, call the waker.
                     match message2.as_any().downcast::<T>() {
                         Ok(result) => {
@@ -275,76 +269,12 @@ where
                         },
                         PollerMsg::Cancel => {
                             // block because we were cancelled after receiving a message on the "real" channel
-                            if (received) {
-                                crate::assume!(false);
-                            }
+                            crate::assume!(false);
                         },
                         _ => unreachable!(),
                     };
                 }
             }
-
-            // // Old version
-            // let res = loop {
-            //     // Wait for either the joiner to poll us, or the receive to succeed.
-            //     let (msg, ind) = crate::select_val_block(&fut_handles.receiver, &recv);
-
-            //     // TODO: Use `cast!` to avoid all the `unreachable!` mess.
-            //     // Joiner polled us
-            //     if ind == 0 {
-            //         match msg.as_any().downcast::<PollerMsg>() {
-            //             Ok(msg) => {
-            //                 match *msg {
-            //                     PollerMsg::Waker(waker) => {
-            //                         // Save the waker and inform them it's Pending
-            //                         join_waker = Some(waker.clone());
-            //                         fut_handles.sender.send_msg(PollerMsg::Pending);
-            //                     }
-            //                     // We're cancelled, without having consumed anything
-            //                     PollerMsg::Cancel => break None,
-            //                     _ => unreachable!(),
-            //                 }
-            //             }
-            //             _ => unreachable!(),
-            //         }
-            //     } else {
-            //         // We did the receive, call the waker.
-            //         assert!(ind == 1);
-            //         match msg.as_any().downcast::<T>() {
-            //             Ok(result) => {
-            //                 if let Some(waker) = join_waker {
-            //                     waker.wake();
-            //                 }
-            //                 // We consumed the message
-            //                 break Some(*result);
-            //             }
-            //             _ => unreachable!(),
-            //         }
-            //     }
-            // };
-
-            // // Select is done, either wait for the request or cancel the receive
-            // let val = match res {
-            //     // We consumed the message
-            //     Some(result) => {
-            //         // Wait once more for the poller
-            //         match fut_handles.receiver.recv_msg_block() {
-            //             // Inform them it's ready, they can try to Join
-            //             PollerMsg::Waker(_) => {
-            //                 fut_handles.sender.send_msg(PollerMsg::Ready);
-            //                 crate::Val::new(result)
-            //             }
-            //             // Cancelled, let's put the message back
-            //             PollerMsg::Cancel => {
-            //                 from_receiver(recv).send_msg(result);
-            //                 crate::Val::new(())
-            //             }
-            //             _ => unreachable!(),
-            //         }
-            //     }
-            //     // We got cancelled without consuming the message: nothing to do
-            //     None => crate::Val::new(()),
-            // };
 
             // Final Message, useful for impl of Drop on JoinHandle
             fut_handles.sender.send_msg(PollerMsg::Done);
