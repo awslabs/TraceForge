@@ -4,10 +4,47 @@ use std::ops::{Add, Div, Mul, Rem, Sub};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SymVarId(pub u64);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SymSort {
     Bool,
     Int,
+    Uninterpreted(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SymFunc {
+    name: String,
+    domain: Vec<SymSort>,
+    range: SymSort,
+}
+
+impl SymFunc {
+    pub fn new(name: impl Into<String>, domain: Vec<SymSort>, range: SymSort) -> Self {
+        Self {
+            name: name.into(),
+            domain,
+            range,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn domain(&self) -> &[SymSort] {
+        &self.domain
+    }
+
+    pub fn range(&self) -> &SymSort {
+        &self.range
+    }
+
+    pub fn apply(&self, args: impl IntoIterator<Item = SymExpr>) -> SymExpr {
+        SymExpr::App {
+            func: self.clone(),
+            args: args.into_iter().collect(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -15,6 +52,7 @@ pub enum SymExpr {
     Var { id: SymVarId, sort: SymSort },
     Bool(bool),
     Int(i64),
+    App { func: SymFunc, args: Vec<SymExpr> },
     Not(Box<SymExpr>),
     And(Box<SymExpr>, Box<SymExpr>),
     Or(Box<SymExpr>, Box<SymExpr>),
@@ -91,6 +129,22 @@ pub fn int_val(v: i64) -> SymExpr {
 
 pub fn bool_val(v: bool) -> SymExpr {
     SymExpr::Bool(v)
+}
+
+pub fn uninterpreted_sort(name: impl Into<String>) -> SymSort {
+    SymSort::Uninterpreted(name.into())
+}
+
+pub fn uf(name: impl Into<String>, domain: &[SymSort], range: SymSort) -> SymFunc {
+    SymFunc::new(name, domain.to_vec(), range)
+}
+
+pub fn predicate(name: impl Into<String>, domain: &[SymSort]) -> SymFunc {
+    uf(name, domain, SymSort::Bool)
+}
+
+pub fn constant(name: impl Into<String>, sort: SymSort) -> SymExpr {
+    SymFunc::new(name, Vec::new(), sort).apply([])
 }
 
 impl From<i64> for SymExpr {

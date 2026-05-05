@@ -8,30 +8,25 @@ use crate::event_label::{ConstraintEval, SymbolicVar};
 use crate::runtime::execution::ExecutionState;
 
 pub fn fresh_int() -> SymExpr {
-    ExecutionState::with(|s| {
-        let pos = s.next_pos();
-        let id = s.must.borrow_mut().next_symbolic_var_id();
-        s.must
-            .borrow_mut()
-            .handle_symbolic_var(SymbolicVar::new(pos, id, SymSort::Int));
-        SymExpr::Var {
-            id,
-            sort: SymSort::Int,
-        }
-    })
+    fresh(SymSort::Int)
 }
 
 pub fn fresh_bool() -> SymExpr {
+    fresh(SymSort::Bool)
+}
+
+pub fn fresh_uninterpreted(name: impl Into<String>) -> SymExpr {
+    fresh(SymSort::Uninterpreted(name.into()))
+}
+
+pub fn fresh(sort: SymSort) -> SymExpr {
     ExecutionState::with(|s| {
         let pos = s.next_pos();
         let id = s.must.borrow_mut().next_symbolic_var_id();
         s.must
             .borrow_mut()
-            .handle_symbolic_var(SymbolicVar::new(pos, id, SymSort::Bool));
-        SymExpr::Var {
-            id,
-            sort: SymSort::Bool,
-        }
+            .handle_symbolic_var(SymbolicVar::new(pos, id, sort.clone()));
+        SymExpr::Var { id, sort }
     })
 }
 

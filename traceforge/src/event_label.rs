@@ -1222,8 +1222,8 @@ impl SymbolicVar {
     pub(crate) fn id(&self) -> SymVarId {
         self.id
     }
-    pub(crate) fn sort(&self) -> SymSort {
-        self.sort
+    pub(crate) fn sort(&self) -> &SymSort {
+        &self.sort
     }
 }
 

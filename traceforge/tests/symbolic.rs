@@ -40,11 +40,7 @@ fn symbolic_backward_revisit_for_right_side_send_is_optimal() {
         worker.join().unwrap();
     });
 
-    assert_eq!(
-        (stats.execs, stats.block),
-        (3, 0),
-        "expected one false branch plus the two optimal true-branch receive outcomes, got {stats:?}"
-    );
+    assert_eq!((stats.execs, stats.block), (3, 0));
 }
 
 #[test]
@@ -133,10 +129,7 @@ fn symbolic_forward_revisit_explores_both_branch_outcomes() {
     });
 
     assert_eq!(stats.block, 0);
-    assert!(
-        stats.execs >= 2,
-        "expected true and false symbolic branch executions, got {stats:?}"
-    );
+    assert!(stats.execs >= 2,);
 }
 
 fn buggy_control_flow_program() {
@@ -169,10 +162,7 @@ fn symbolic_buggy_control_flow_panics_on_feasible_assert_failure() {
 fn symbolic_buggy_control_flow_records_failure_when_keep_going() {
     let stats = verify(symbolic_keep_going_config(), buggy_control_flow_program);
 
-    assert!(
-        stats.block > 0,
-        "expected a feasible assertion failure for i = 1, got {stats:?}"
-    );
+    assert!(stats.block > 0,);
 }
 
 #[test]
@@ -203,8 +193,105 @@ fn symbolic_receive_order_revisit_can_expose_order_sensitive_bug() {
         worker2.join().unwrap();
     });
 
-    assert!(
-        stats.block > 0,
-        "expected reversed receive order to violate second == first + 1, got {stats:?}"
-    );
+    assert!(stats.block > 0,);
+}
+
+#[test]
+fn symbolic_uninterpreted_sort_supports_equality() {
+    let stats = verify(symbolic_config(), || {
+        let node = symbolic::uninterpreted_sort("Node");
+        let x = symbolic::fresh(node.clone());
+        let y = symbolic::fresh(node);
+
+        symbolic::assert(x.clone().equals(y.clone()).implies(y.equals(x)));
+    });
+
+    assert_eq!((stats.execs, stats.block), (1, 0));
+}
+
+#[test]
+fn symbolic_uninterpreted_function_preserves_congruence() {
+    let stats = verify(symbolic_config(), || {
+        let node = symbolic::uninterpreted_sort("Node");
+        let parent = symbolic::uf("parent", &[node.clone()], node.clone());
+
+        let x = symbolic::fresh(node.clone());
+        let y = symbolic::fresh(node);
+
+        symbolic::assert(
+            x.clone()
+                .equals(y.clone())
+                .implies(parent.apply([x]).equals(parent.apply([y]))),
+        );
+    });
+
+    assert_eq!((stats.execs, stats.block), (1, 0));
+}
+
+#[test]
+fn symbolic_uninterpreted_predicate_explores_both_branch_outcomes() {
+    let stats = verify(symbolic_config(), || {
+        let node = symbolic::uninterpreted_sort("Node");
+        let marked = symbolic::predicate("marked", &[node.clone()]);
+        let x = symbolic::fresh(node);
+
+        if symbolic::eval(marked.apply([x])) {
+            // true branch
+        } else {
+            // false branch
+        }
+    });
+
+    assert_eq!((stats.execs, stats.block), (2, 0));
+}
+
+#[test]
+fn symbolic_uninterpreted_function_application_can_be_sent() {
+    let stats = verify(symbolic_config(), || {
+        let main_id = thread::current_id();
+        let node = symbolic::uninterpreted_sort("Node");
+        let parent = symbolic::uf("parent", &[node.clone()], node.clone());
+
+        let worker = thread::spawn(move || {
+            let v: symbolic::SymExpr = recv_msg_block();
+            send_msg(main_id, v);
+        });
+
+        let x = symbolic::fresh(node);
+        let px = parent.apply([x]);
+        send_msg(worker.thread().id(), px.clone());
+
+        let echoed: symbolic::SymExpr = recv_msg_block();
+        symbolic::assert(echoed.equals(px));
+
+        worker.join().unwrap();
+    });
+
+    assert_eq!((stats.execs, stats.block), (1, 0));
+}
+
+#[test]
+fn symbolic_backward_revisit_with_uninterpreted_predicate_is_optimal() {
+    let stats = verify(symbolic_ltr_config(), || {
+        let main_id = thread::current_id();
+        let node = symbolic::uninterpreted_sort("Node");
+        let ready = symbolic::predicate("ready", &[node.clone()]);
+        let ready_for_worker = ready.clone();
+
+        let worker = thread::spawn(move || {
+            let x = symbolic::fresh(node);
+            if symbolic::eval(ready_for_worker.apply([x.clone()])) {
+                send_msg(main_id, x);
+            }
+        });
+
+        let received: Option<symbolic::SymExpr> = recv_msg();
+        if let Some(x) = received {
+            symbolic::assert(ready.apply([x]));
+        }
+
+        worker.join().unwrap();
+    });
+
+    assert_eq!((stats.execs, stats.block), (3, 0));
 }
