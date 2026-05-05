@@ -65,7 +65,7 @@ impl RecvLoc {
     /// Returns whether the receive's tag matches the send's tag
     pub(crate) fn matches_tag(&self, send: &SendMsg) -> bool {
         let send_loc = send.send_loc();
-        self.tag.is_none() || self.tag.as_ref().unwrap().0(send_loc.sender_tid, send_loc.tag)
+        self.tag.is_none() || self.tag.as_ref().unwrap().0(send_loc.sender_tid, send_loc.tag.clone())
     }
 
     /// Return whether the receive's tag and any of it's locations matches the send
@@ -87,7 +87,7 @@ pub(crate) struct SendLoc {
     #[serde(skip)]
     loc: Option<Loc>,
     pub(crate) sender_tid: ThreadId,
-    pub(crate) tag: Option<u32>,
+    pub(crate) tag: Option<Vec<u32>>,
 }
 
 impl SendLoc {
@@ -101,7 +101,7 @@ impl SendLoc {
         }
     }
 
-    pub(crate) fn new(loc: &Loc, sender_tid: ThreadId, tag: Option<u32>) -> Self {
+    pub(crate) fn new(loc: &Loc, sender_tid: ThreadId, tag: Option<Vec<u32>>) -> Self {
         SendLoc {
             loc: Some(loc.clone()),
             sender_tid,
