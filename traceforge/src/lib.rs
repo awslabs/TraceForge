@@ -313,7 +313,6 @@ impl ConfigBuilder {
 	        predetermined_choices: HashMap::new(),
             predetermined_global_choices: HashMap::new(),
             pretty_graph_printing: false,
-            predetermined_choices: HashMap::new(),
             callbacks: Arc::new(Mutex::new(Vec::new())),
         })
     }
