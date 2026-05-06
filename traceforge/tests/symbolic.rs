@@ -44,6 +44,88 @@ fn symbolic_backward_revisit_for_right_side_send_is_optimal() {
 }
 
 #[test]
+fn symbolic_forall_reflexive_equality_is_valid() {
+    let stats = verify(symbolic_config(), || {
+        let node = symbolic::uninterpreted_sort("Node");
+
+        symbolic::assert(symbolic::forall([("x", node)], |vars| {
+            let x = vars.get("x");
+            x.clone().equals(x)
+        }));
+    });
+
+    assert_eq!((stats.execs, stats.block), (1, 0));
+}
+
+#[test]
+fn symbolic_exists_constant_equality_is_satisfiable() {
+    let stats = verify(symbolic_config(), || {
+        let node = symbolic::uninterpreted_sort("Node");
+        let root = symbolic::constant("root", node.clone());
+
+        symbolic::assume(symbolic::exists([("x", node)], |vars| {
+            vars.get("x").equals(root)
+        }));
+    });
+
+    assert_eq!((stats.execs, stats.block), (1, 0));
+}
+
+#[test]
+fn symbolic_quantified_predicate_explores_both_branch_outcomes() {
+    let stats = verify(symbolic_config(), || {
+        let node = symbolic::uninterpreted_sort("Node");
+        let marked = symbolic::predicate("marked", &[node.clone()]);
+
+        let all_marked = symbolic::forall([("x", node)], |vars| marked.apply([vars.get("x")]));
+
+        if symbolic::eval(all_marked) {
+            // true branch
+        } else {
+            // false branch
+        }
+    });
+
+    assert_eq!((stats.execs, stats.block), (2, 0));
+}
+
+#[test]
+fn symbolic_quantifier_detects_invalid_assertion() {
+    let stats = verify(symbolic_keep_going_config(), || {
+        let node = symbolic::uninterpreted_sort("Node");
+        let marked = symbolic::predicate("marked", &[node.clone()]);
+        let root = symbolic::constant("root", node.clone());
+
+        symbolic::assert(
+            symbolic::forall([("x", node)], |vars| marked.apply([vars.get("x")]))
+                .and(marked.apply([root]).not()),
+        );
+    });
+
+    assert_eq!((stats.execs, stats.block), (0, 1));
+}
+
+#[test]
+fn symbolic_nested_quantifier_can_reference_outer_variable() {
+    let stats = verify(symbolic_config(), || {
+        let node = symbolic::uninterpreted_sort("Node");
+        let same = symbolic::predicate("same", &[node.clone(), node.clone()]);
+
+        symbolic::assert(symbolic::forall([("x", node.clone())], |outer| {
+            outer.exists([("y", node)], |inner| {
+                let x = inner.get("x");
+                let y = inner.get("y");
+                x.clone()
+                    .equals(y.clone())
+                    .and(same.apply([x, y]).implies(symbolic::bool_val(true)))
+            })
+        }));
+    });
+
+    assert_eq!((stats.execs, stats.block), (1, 0));
+}
+
+#[test]
 fn symbolic_echo_transports_formula() {
     let stats = verify(symbolic_config(), || {
         let main_id = thread::current_id();
@@ -193,7 +275,7 @@ fn symbolic_receive_order_revisit_can_expose_order_sensitive_bug() {
         worker2.join().unwrap();
     });
 
-    assert!(stats.block > 0,);
+    assert!(stats.block > 0);
 }
 
 #[test]

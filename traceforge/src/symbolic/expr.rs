@@ -47,12 +47,112 @@ impl SymFunc {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct BoundVarId {
+    depth: usize,
+    index: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct BoundVar {
+    id: BoundVarId,
+    name: String,
+    sort: SymSort,
+}
+
+impl BoundVar {
+    pub fn expr(&self) -> SymExpr {
+        SymExpr::BoundVar {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            sort: self.sort.clone(),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn sort(&self) -> &SymSort {
+        &self.sort
+    }
+}
+
+impl BoundVarId {
+    pub(crate) fn depth(&self) -> usize {
+        self.depth
+    }
+
+    pub(crate) fn index(&self) -> usize {
+        self.index
+    }
+}
+
+pub struct BoundVars {
+    scopes: Vec<Vec<(String, SymSort)>>,
+}
+
+impl BoundVars {
+    pub fn get(&self, name: &str) -> SymExpr {
+        self.scopes
+            .iter()
+            .enumerate()
+            .find_map(|(depth, scope)| {
+                scope
+                    .iter()
+                    .enumerate()
+                    .find(|(_, (var_name, _))| var_name == name)
+                    .map(|(index, (name, sort))| SymExpr::BoundVar {
+                        id: BoundVarId { depth, index },
+                        name: name.clone(),
+                        sort: sort.clone(),
+                    })
+            })
+            .unwrap_or_else(|| panic!("unknown bound variable `{name}`"))
+    }
+
+    pub fn forall<const N: usize>(
+        &self,
+        vars: [(&str, SymSort); N],
+        body: impl FnOnce(&BoundVars) -> SymExpr,
+    ) -> SymExpr {
+        quantified_with_scopes(true, &self.scopes, vars, body)
+    }
+
+    pub fn exists<const N: usize>(
+        &self,
+        vars: [(&str, SymSort); N],
+        body: impl FnOnce(&BoundVars) -> SymExpr,
+    ) -> SymExpr {
+        quantified_with_scopes(false, &self.scopes, vars, body)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SymExpr {
-    Var { id: SymVarId, sort: SymSort },
+    Var {
+        id: SymVarId,
+        sort: SymSort,
+    },
+    BoundVar {
+        id: BoundVarId,
+        name: String,
+        sort: SymSort,
+    },
     Bool(bool),
     Int(i64),
-    App { func: SymFunc, args: Vec<SymExpr> },
+    App {
+        func: SymFunc,
+        args: Vec<SymExpr>,
+    },
+    Forall {
+        vars: Vec<BoundVar>,
+        body: Box<SymExpr>,
+    },
+    Exists {
+        vars: Vec<BoundVar>,
+        body: Box<SymExpr>,
+    },
     Not(Box<SymExpr>),
     And(Box<SymExpr>, Box<SymExpr>),
     Or(Box<SymExpr>, Box<SymExpr>),
@@ -145,6 +245,68 @@ pub fn predicate(name: impl Into<String>, domain: &[SymSort]) -> SymFunc {
 
 pub fn constant(name: impl Into<String>, sort: SymSort) -> SymExpr {
     SymFunc::new(name, Vec::new(), sort).apply([])
+}
+
+pub fn forall<const N: usize>(
+    vars: [(&str, SymSort); N],
+    body: impl FnOnce(&BoundVars) -> SymExpr,
+) -> SymExpr {
+    quantified(true, vars, body)
+}
+
+pub fn exists<const N: usize>(
+    vars: [(&str, SymSort); N],
+    body: impl FnOnce(&BoundVars) -> SymExpr,
+) -> SymExpr {
+    quantified(false, vars, body)
+}
+
+fn quantified<const N: usize>(
+    is_forall: bool,
+    vars: [(&str, SymSort); N],
+    body: impl FnOnce(&BoundVars) -> SymExpr,
+) -> SymExpr {
+    quantified_with_scopes(is_forall, &[], vars, body)
+}
+
+fn quantified_with_scopes<const N: usize>(
+    is_forall: bool,
+    outer_scopes: &[Vec<(String, SymSort)>],
+    vars: [(&str, SymSort); N],
+    body: impl FnOnce(&BoundVars) -> SymExpr,
+) -> SymExpr {
+    let vars = vars
+        .into_iter()
+        .enumerate()
+        .map(|(index, (name, sort))| BoundVar {
+            id: BoundVarId { depth: 0, index },
+            name: name.to_string(),
+            sort,
+        })
+        .collect::<Vec<_>>();
+
+    let mut scopes = Vec::with_capacity(outer_scopes.len() + 1);
+    scopes.push(
+        vars.iter()
+            .map(|var| (var.name.clone(), var.sort.clone()))
+            .collect(),
+    );
+    scopes.extend_from_slice(outer_scopes);
+
+    let bound_vars = BoundVars { scopes };
+    let body = body(&bound_vars);
+
+    if is_forall {
+        SymExpr::Forall {
+            vars,
+            body: Box::new(body),
+        }
+    } else {
+        SymExpr::Exists {
+            vars,
+            body: Box::new(body),
+        }
+    }
 }
 
 impl From<i64> for SymExpr {
