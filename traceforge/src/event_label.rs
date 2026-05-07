@@ -1220,7 +1220,7 @@ impl SymbolicVar {
     }
 
     pub(crate) fn id(&self) -> SymVarId {
-        self.id
+        self.id.clone()
     }
     pub(crate) fn sort(&self) -> &SymSort {
         &self.sort

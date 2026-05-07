@@ -1,8 +1,19 @@
+use crate::event::Event;
 use serde::{Deserialize, Serialize};
 use std::ops::{Add, Div, Mul, Rem, Sub};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SymVarId(pub u64);
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SymVarId(Event);
+
+impl SymVarId {
+    pub(crate) fn from_event(pos: Event) -> Self {
+        Self(pos)
+    }
+
+    pub(crate) fn suffix(&self) -> String {
+        format!("{}_{}", self.0.thread, self.0.index)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SymSort {

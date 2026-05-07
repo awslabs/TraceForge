@@ -76,17 +76,17 @@ impl SymbolicSolver {
             SymExpr::Var {
                 id,
                 sort: SymSort::Bool,
-            } => Dynamic::from_ast(&Bool::new_const(format!("sym_b_{}", id.0))),
+            } => Dynamic::from_ast(&Bool::new_const(format!("sym_b_{}", id.suffix()))),
             SymExpr::Var {
                 id,
                 sort: SymSort::Int,
-            } => Dynamic::from_ast(&Int::new_const(format!("sym_i_{}", id.0))),
+            } => Dynamic::from_ast(&Int::new_const(format!("sym_i_{}", id.suffix()))),
             SymExpr::Var {
                 id,
                 sort: sort @ SymSort::Uninterpreted(_),
             } => {
                 let sort = self.compile_sort(sort);
-                Dynamic::new_const(format!("sym_u_{}", id.0), &sort)
+                Dynamic::new_const(format!("sym_u_{}", id.suffix()), &sort)
             }
             SymExpr::BoundVar { id, .. } => self.lookup_bound(env, id),
             SymExpr::Bool(value) => Dynamic::from_ast(&Bool::from_bool(*value)),

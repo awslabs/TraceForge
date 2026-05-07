@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use traceforge::{
     recv_msg, recv_msg_block, send_msg, symbolic, thread, verify, Config, SchedulePolicy,
 };
@@ -376,4 +378,52 @@ fn symbolic_backward_revisit_with_uninterpreted_predicate_is_optimal() {
     });
 
     assert_eq!((stats.execs, stats.block), (3, 0));
+}
+
+#[test]
+fn symbolic_var_ids_are_stable_across_different_schedule_orders() {
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let observations_clone = observations.clone();
+
+    traceforge::test(
+        Config::builder()
+            .with_policy(SchedulePolicy::Arbitrary)
+            .with_symbolic(true)
+            .build(),
+        move || {
+            let observations_ref = observations_clone.clone();
+            let main_id = thread::current_id();
+
+            let left = thread::spawn(move || {
+                let x = symbolic::fresh_int();
+                send_msg(main_id, ("left".to_string(), format!("{x:?}")));
+            });
+
+            let main_id = thread::current_id();
+            let right = thread::spawn(move || {
+                let y = symbolic::fresh_int();
+                send_msg(main_id, ("right".to_string(), format!("{y:?}")));
+            });
+
+            let first: (String, String) = recv_msg_block();
+            let second: (String, String) = recv_msg_block();
+            observations_ref.lock().unwrap().extend([first, second]);
+
+            left.join().unwrap();
+            right.join().unwrap();
+        },
+        20,
+    );
+
+    let mut ids_by_role = HashMap::<String, HashSet<String>>::new();
+    for (role, expr) in observations.lock().unwrap().iter() {
+        ids_by_role
+            .entry(role.clone())
+            .or_default()
+            .insert(expr.clone());
+    }
+
+    assert_eq!(ids_by_role["left"].len(), 1, "{ids_by_role:#?}");
+    assert_eq!(ids_by_role["right"].len(), 1, "{ids_by_role:#?}");
+    assert_ne!(ids_by_role["left"], ids_by_role["right"],);
 }

@@ -136,8 +136,6 @@ pub(crate) struct Must {
     pub(crate) next_thread_index: HashMap<String, usize>,
     // Per-execution counters: (choice_name, thread_idx) -> occurrence count
     pub(crate) choice_occurrence_counters: HashMap<(String, usize), usize>,
-    // Next available index for symbolic variable
-    pub(crate) next_sym_var: u64,
     // Solver for the symbolic constraints in the current execution.
     symbolic_solver: SymbolicSolver,
 }
@@ -173,7 +171,6 @@ impl Must {
             thread_index_map: HashMap::new(),
             next_thread_index: HashMap::new(),
             choice_occurrence_counters: HashMap::new(),
-            next_sym_var: 1,
             symbolic_solver: SymbolicSolver::new(),
         }
     }
@@ -199,7 +196,6 @@ impl Must {
         self.thread_index_map.clear();
         self.next_thread_index.clear();
         self.choice_occurrence_counters.clear();
-        self.next_sym_var = 1;
         self.symbolic_solver.reset();
     }
 
@@ -219,7 +215,6 @@ impl Must {
 
     pub(crate) fn begin_execution(must: &Rc<RefCell<Must>>) {
         let mut must = must.borrow_mut();
-        must.next_sym_var = 1;
         must.symbolic_solver.reset();
         must.current.graph.initialize_for_execution();
         must.telemetry.coverage.new_eid();
@@ -313,12 +308,6 @@ impl Must {
         self.states.clear();
         self.current.graph = eg;
         self.symbolic_solver.reset();
-    }
-
-    pub(crate) fn next_symbolic_var_id(&mut self) -> SymVarId {
-        let id = SymVarId(self.next_sym_var);
-        self.next_sym_var += 1;
-        id
     }
 
     /// Add the replay information to a fresh instance of Must

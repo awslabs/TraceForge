@@ -22,10 +22,10 @@ pub fn fresh_uninterpreted(name: impl Into<String>) -> SymExpr {
 pub fn fresh(sort: SymSort) -> SymExpr {
     ExecutionState::with(|s| {
         let pos = s.next_pos();
-        let id = s.must.borrow_mut().next_symbolic_var_id();
+        let id = SymVarId::from_event(pos);
         s.must
             .borrow_mut()
-            .handle_symbolic_var(SymbolicVar::new(pos, id, sort.clone()));
+            .handle_symbolic_var(SymbolicVar::new(pos, id.clone(), sort.clone()));
         SymExpr::Var { id, sort }
     })
 }
