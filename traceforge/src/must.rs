@@ -15,7 +15,7 @@ use crate::{Config, ExplorationMode, SchedulePolicy, Stats};
 use log::{debug, info, trace, warn};
 use rand::distr::Distribution;
 use rand::seq::IndexedRandom;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rand_pcg::Pcg64Mcg;
 
 use core::panic;
@@ -935,7 +935,7 @@ impl Must {
                 .find(|(t, i)| self.is_thread_runnable(t, i))
                 .map(|(t, _)| t.to_owned()),
             SchedulePolicy::Arbitrary => runnable
-                .choose_multiple(&mut self.rng, runnable.len())
+                .sample(&mut self.rng, runnable.len())
                 .find(|(t, i)| self.is_thread_runnable(t, i))
                 .map(|(t, _)| t.to_owned()),
         };

@@ -41,7 +41,7 @@ use event_label::{Block, BlockType, CToss, Choice, RecvMsg, SendMsg};
 use loc::{CommunicationModel, Loc, RecvLoc, SendLoc};
 use msg::Message;
 
-use rand::{distr::Distribution, rngs::OsRng, TryRngCore};
+use rand::{distr::Distribution, Rng};
 use replay::ReplayInformation;
 use runtime::execution::{Execution, ExecutionState};
 use runtime::failure::persist_task_failure;
@@ -293,7 +293,7 @@ impl ConfigBuilder {
             schedule_policy: SchedulePolicy::LTR,
             max_iterations: None,
             verbose: 0,
-            seed: OsRng.try_next_u64().expect("OsRng failed"),
+            seed: rand::rng().next_u64(),
             symmetry: false,
             vr: false,
             lossy_budget: 0,
