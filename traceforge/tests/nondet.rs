@@ -224,7 +224,7 @@ fn test_named_nondet_two_threads_one_predetermined() {
         "worker_choice".to_string(),
         vec![
             vec![true, false], // Thread 0 (first to call): true then false
-                            // Thread 1 (second to call): not predetermined, will explore all options
+                               // Thread 1 (second to call): not predetermined, will explore all options
         ],
     );
 

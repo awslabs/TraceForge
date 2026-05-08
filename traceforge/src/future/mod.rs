@@ -7,11 +7,14 @@
 //!
 //! [`futures::executor`]: https://docs.rs/futures/0.3.30/futures/executor/index.html
 
-use crate::channel::{from_receiver, Builder, Receiver, Sender};
+use crate::channel::{Builder, Receiver, Sender};
 use crate::loc::WakeMsg;
 use crate::msg::Message;
 use crate::runtime::execution::ExecutionState;
-use crate::runtime::task::TaskId;
+use crate::runtime::task::{TaskId};
+
+
+
 use crate::runtime::thread::{self, switch};
 use crate::thread::Thread;
 use crate::CommunicationModel::LocalOrder;
@@ -207,67 +210,71 @@ where
     let recv = recv.clone();
     let task_id = ExecutionState::spawn_thread(
         move || {
-            let mut join_waker: Option<Waker> = None;
-            let res = loop {
-                // Wait for either the joiner to poll us, or the receive to succeed.
-                let (msg, ind) = crate::select_val_block(&fut_handles.receiver, &recv);
+            let mut val = crate::Val::new(());
+            let msg;
+    
+            let message1 = fut_handles.receiver.recv_msg_block();
+            if let PollerMsg::Waker(waker) = message1 {
+                // Save the waker and inform them it's Pending
+                let join_waker = Some(waker.clone());
+                fut_handles.sender.send_msg(PollerMsg::Pending);
 
+                let (message2, ind) = crate::select_val_block(&fut_handles.receiver, &recv);
                 // TODO: Use `cast!` to avoid all the `unreachable!` mess.
-                // Joiner polled us
                 if ind == 0 {
-                    match msg.as_any().downcast::<PollerMsg>() {
+                    // We receive Waker and send Pending, or Cancel; nothing to do afterwards
+                    match message2.as_any().downcast::<PollerMsg>() {
                         Ok(msg) => {
                             match *msg {
-                                PollerMsg::Waker(waker) => {
-                                    // Save the waker and inform them it's Pending
-                                    join_waker = Some(waker.clone());
+                                PollerMsg::Waker(_) => {
                                     fut_handles.sender.send_msg(PollerMsg::Pending);
-                                }
-                                // We're cancelled, without having consumed anything
-                                PollerMsg::Cancel => break None,
-                                _ => unreachable!(),
+                                    // if we return Pending we may need to return Pending again
+                                    loop {
+                                        let message_n = fut_handles.receiver.recv_msg_block();
+                                        match message_n {
+                                            PollerMsg::Waker(_) => {
+                                                fut_handles.sender.send_msg(PollerMsg::Pending);
+                                            },
+                                            PollerMsg::Cancel => {
+                                                break;
+                                            },
+                                            _ => unreachable!(),
+                                        }
+                                    }
+                                },
+                                _ => {},
                             }
                         }
                         _ => unreachable!(),
                     }
                 } else {
                     // We did the receive, call the waker.
-                    assert!(ind == 1);
-                    match msg.as_any().downcast::<T>() {
+                    match message2.as_any().downcast::<T>() {
                         Ok(result) => {
                             if let Some(waker) = join_waker {
                                 waker.wake();
                             }
                             // We consumed the message
-                            break Some(*result);
+                            msg = Some(*result);
                         }
                         _ => unreachable!(),
                     }
-                }
-            };
 
-            // Select is done, either wait for the request or cancel the receive
-            let val = match res {
-                // We consumed the message
-                Some(result) => {
-                    // Wait once more for the poller
-                    match fut_handles.receiver.recv_msg_block() {
-                        // Inform them it's ready, they can try to Join
+                    // At this point we can either receive Waker or Cancel
+                    let message3 = fut_handles.receiver.recv_msg_block();
+                    match message3 {
                         PollerMsg::Waker(_) => {
                             fut_handles.sender.send_msg(PollerMsg::Ready);
-                            crate::Val::new(result)
-                        }
-                        // Cancelled, let's put the message back
+                            val = crate::Val::new(msg.unwrap());
+                        },
                         PollerMsg::Cancel => {
-                            from_receiver(recv).send_msg(result);
-                            crate::Val::new(())
-                        }
+                            // block because we were cancelled after receiving a message on the "real" channel
+                            crate::assume!(false);
+                        },
                         _ => unreachable!(),
-                    }
+                    };
                 }
-                // We got cancelled without consuming the message: nothing to do
-                None => crate::Val::new(()),
-            };
+            }
 
             // Final Message, useful for impl of Drop on JoinHandle
             fut_handles.sender.send_msg(PollerMsg::Done);
@@ -289,14 +296,14 @@ where
     let (thread_id, name) = ExecutionState::with(|state| {
         let pos = state.next_pos();
         let tid = state.must.borrow().next_thread_id(&pos);
-        let name = format!("<async_recv-{}>", tid.to_number());
+        let name = format!("traceforge_runtime::async_recv-{}", tid.to_number());
         state.must.borrow_mut().handle_tcreate(
             tid,
             task_id,
             None, /* asyncs do not have symmetric versions for symm reduction */
             pos,
             Some(name.clone()),
-            false, /* asyncs are not daemon threads */
+            true, /* async receives are daemon threads */
         );
         (tid, Some(name))
     });

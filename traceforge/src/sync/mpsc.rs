@@ -138,7 +138,7 @@ impl<T: Message + 'static> UnboundedSender<T> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct UnboundedReceiver<T> {
-    receiver: crate::channel::Receiver<T>,
+    pub(crate) receiver: crate::channel::Receiver<T>,
 }
 unsafe impl<T: Send> Send for UnboundedReceiver<T> {}
 
@@ -176,6 +176,15 @@ impl<T: Message + Clone + 'static> UnboundedReceiver<T> {
     pub fn is_closed(&self) -> bool {
         named_nondet("mpsc::UnboundedReceiver::is_closed")
     }
+}
+
+pub fn unbounded_mpsc_select<'a, T: Message + 'static, U: Message + 'static>(
+    // The main receiver
+    primary: &'a UnboundedReceiver<T>,
+    // A secondary receiver, usually a one-shot-like channel whose communication model doesn't matter
+    secondary: &'a UnboundedReceiver<U>,
+) -> (Val, usize) {
+    select_val_block(&primary.receiver, &secondary.receiver)
 }
 
 pub mod error {
