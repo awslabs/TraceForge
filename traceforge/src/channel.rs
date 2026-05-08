@@ -1,4 +1,4 @@
-use std::{future::Future, iter, sync::Arc};
+use std::{future::Future, iter};
 
 use serde::{Deserialize, Serialize};
 
@@ -7,14 +7,15 @@ use crate::{
     identifier::Identifier,
     loc::{CommunicationModel, Loc},
     msg::Message,
-    predicate::PredicateType,
     runtime::execution::ExecutionState,
     thread::ThreadId,
     ConsType, Unique,
 };
 
-// added for try_recv
+use crate::predicate::{normalize_vec_tag, PredicateType};
 use std::fmt::Error;
+use std::sync::Arc;
+
 type Result<T> = std::result::Result<T, Error>;
 
 #[allow(deprecated)]
@@ -104,6 +105,16 @@ impl<T: Message + 'static> Sender<T> {
         crate::send_msg_with_tag(v, Some(tag), &self.inner, self.comm, true)
     }
 
+    pub fn send_vec_tagged_msg(&self, tag: Vec<u32>, v: T) {
+        let tag = if tag.is_empty() { None } else { Some(tag) };
+        crate::send_msg_with_vec_tag(v, tag, &self.inner, self.comm, false)
+    }
+
+    pub fn send_vec_tagged_lossy_msg(&self, tag: Vec<u32>, v: T) {
+        let tag = if tag.is_empty() { None } else { Some(tag) };
+        crate::send_msg_with_vec_tag(v, tag, &self.inner, self.comm, true)
+    }
+
     pub fn send_msg(&self, v: T) {
         crate::send_msg_with_tag(v, None, &self.inner, self.comm, false);
     }
@@ -147,7 +158,17 @@ impl<T: Message + Clone + 'static> Receiver<T> {
     where
         F: Fn(Option<u32>) -> bool + 'static + Send + Sync,
     {
-        let f = move |_tid, opt| f(opt);
+        self.recv_vec_tagged_msg(move |tag_vec| {
+            let tag = tag_vec.as_ref().and_then(|tags| tags.first().copied());
+            f(tag)
+        })
+    }
+
+    pub fn recv_vec_tagged_msg<F>(&self, f: F) -> Option<T>
+    where
+        F: Fn(Option<Vec<u32>>) -> bool + 'static + Send + Sync,
+    {
+        let f = move |_tid, opt| f(normalize_vec_tag(opt));
         crate::recv_msg_with_tag(
             iter::once(&self.inner),
             self.comm,
@@ -168,7 +189,17 @@ impl<T: Message + Clone + 'static> Receiver<T> {
     where
         F: Fn(Option<u32>) -> bool + 'static + Send + Sync,
     {
-        let f = move |_tid, opt| f(opt);
+        self.recv_vec_tagged_msg_block(move |tag_vec| {
+            let tag = tag_vec.as_ref().and_then(|tags| tags.first().copied());
+            f(tag)
+        })
+    }
+
+    pub fn recv_vec_tagged_msg_block<F>(&self, f: F) -> T
+    where
+        F: Fn(Option<Vec<u32>>) -> bool + 'static + Send + Sync,
+    {
+        let f = move |_tid, opt| f(normalize_vec_tag(opt));
         crate::recv_msg_block_with_tag(
             iter::once(&self.inner),
             self.comm,

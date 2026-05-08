@@ -32,7 +32,8 @@ pub use testmode::{parallel_test, test};
 pub mod thread;
 mod vector_clock;
 
-pub use crate::msg::Val; // `Val` is used by monitors.
+pub use crate::msg::Val;
+// `Val` is used by monitors.
 
 use channel::{cons_to_model, self_loc_comm, thread_loc_comm, Receiver};
 use coverage::ExecutionObserver;
@@ -40,14 +41,14 @@ use event_label::{Block, BlockType, CToss, Choice, RecvMsg, SendMsg};
 use loc::{CommunicationModel, Loc, RecvLoc, SendLoc};
 use msg::Message;
 
-use rand::{prelude::*, rngs::OsRng, RngCore};
+use rand::{distr::Distribution, rngs::OsRng, TryRngCore};
 use replay::ReplayInformation;
 use runtime::execution::{Execution, ExecutionState};
 use runtime::failure::persist_task_failure;
 use runtime::thread::continuation::{ContinuationPool, CONTINUATION_POOL};
 use runtime::thread::switch;
 
-use log::{info, trace, debug};
+use log::{debug, info, trace};
 use serde::{Deserialize, Serialize};
 use smallvec::alloc::sync::Arc;
 use std::cell::RefCell;
@@ -62,7 +63,7 @@ use std::io::Write;
 use crate::event_label::*;
 use crate::exec_pool::ExecutionPool;
 use crate::must::{MonitorInfo, Must};
-use crate::predicate::PredicateType;
+use crate::predicate::{normalize_vec_tag, PredicateType};
 
 use std::any::type_name;
 
@@ -292,7 +293,7 @@ impl ConfigBuilder {
             schedule_policy: SchedulePolicy::LTR,
             max_iterations: None,
             verbose: 0,
-            seed: OsRng.next_u64(),
+            seed: OsRng.try_next_u64().expect("OsRng failed"),
             symmetry: false,
             vr: false,
             lossy_budget: 0,
@@ -899,8 +900,25 @@ where
     F: Fn(ThreadId, Option<u32>) -> bool + 'static + Send + Sync,
     T: Message + 'static,
 {
+    select_vec_tagged_msg(recvs, comm, move |tid, tag| {
+        let tag = tag.and_then(|tags| tags.first().copied());
+        f(tid, tag)
+    })
+}
+
+pub fn select_vec_tagged_msg<'a, F, T>(
+    recvs: impl Iterator<Item = &'a &'a Receiver<T>>,
+    comm: CommunicationModel,
+    f: F,
+) -> Option<(T, usize)>
+where
+    F: Fn(ThreadId, Option<Vec<u32>>) -> bool + 'static + Send + Sync,
+    T: Message + 'static,
+{
     let locs = recvs.map(|r| &r.inner);
-    recv_msg_with_tag(locs, comm, Some(PredicateType(Arc::new(f))))
+    recv_msg_with_tag(locs, comm, Some(PredicateType(Arc::new(move |tid, tag| {
+        f(tid, normalize_vec_tag(tag))
+    }))))
 }
 
 pub fn select_msg_block<'a, T: Message + 'static>(
@@ -920,8 +938,25 @@ where
     F: Fn(ThreadId, Option<u32>) -> bool + 'static + Send + Sync,
     T: Message + 'static,
 {
+    select_vec_tagged_msg_block(recvs, comm, move |tid, tag| {
+        let tag = tag.and_then(|tags| tags.first().copied());
+        f(tid, tag)
+    })
+}
+
+pub fn select_vec_tagged_msg_block<'a, F, T>(
+    recvs: impl Iterator<Item = &'a &'a Receiver<T>>,
+    comm: CommunicationModel,
+    f: F,
+) -> (T, usize)
+where
+    F: Fn(ThreadId, Option<Vec<u32>>) -> bool + 'static + Send + Sync,
+    T: Message + 'static,
+{
     let locs = recvs.map(|r| &r.inner);
-    recv_msg_block_with_tag(locs, comm, Some(PredicateType(Arc::new(f))))
+    recv_msg_block_with_tag(locs, comm, Some(PredicateType(Arc::new(move |tid, tag| {
+        f(tid, normalize_vec_tag(tag))
+    }))))
 }
 
 // Main API
@@ -950,6 +985,18 @@ pub fn send_tagged_lossy_msg<T: Message + 'static>(t: ThreadId, tag: u32, v: T) 
     send_msg_with_tag(v, Some(tag), &loc, comm, true)
 }
 
+/// Sends to `t` the message `v` tagged with a vector 'tag
+pub fn send_vec_tagged_msg<T: Message + 'static>(t: ThreadId, tag: Vec<u32>, v: T) {
+    let (loc, comm) = thread_loc_comm(t);
+    send_msg_with_vec_tag(v, Some(tag), &loc, comm, false)
+}
+
+/// Sends to `t` the message `v`, which can be lost, tagged with 'tag
+pub fn send_vec_tagged_lossy_msg<T: Message + 'static>(t: ThreadId, tag: Vec<u32>, v: T) {
+    let (loc, comm) = thread_loc_comm(t);
+    send_msg_with_vec_tag(v, Some(tag), &loc, comm, true)
+}
+
 /// Helper for [`send_msg`] and [`send_tagged_msg`]
 fn send_msg_with_tag<T: Message + 'static>(
     v: T,
@@ -958,6 +1005,18 @@ fn send_msg_with_tag<T: Message + 'static>(
     comm: CommunicationModel,
     lossy: bool,
 ) {
+    send_msg_with_vec_tag(v, tag.map(|t| vec![t]), loc, comm, lossy);
+}
+
+/// Helper for vector tagged message sending
+fn send_msg_with_vec_tag<T: Message + 'static>(
+    v: T,
+    tag: Option<Vec<u32>>,
+    loc: &Loc,
+    comm: CommunicationModel,
+    lossy: bool,
+) {
+    let tag = normalize_vec_tag(tag);
     switch();
     ExecutionState::with(|s| {
         // creating the send label for the system send
@@ -1026,8 +1085,27 @@ where
     F: Fn(ThreadId, Option<u32>) -> bool + 'static + Send + Sync,
     T: Message + 'static,
 {
+    recv_vec_tagged_msg(move |tid, tag| {
+        let tag = tag.and_then(|tags| tags.first().copied());
+        f(tid, tag)
+    })
+}
+
+/// Returns a vector-tagged message from the thread queue or times out
+pub fn recv_vec_tagged_msg<F, T>(f: F) -> Option<T>
+where
+    F: Fn(ThreadId, Option<Vec<u32>>) -> bool + 'static + Send + Sync,
+    T: Message + 'static,
+{
     let (loc, comm) = self_loc_comm();
-    recv_msg_with_tag(iter::once(&loc), comm, Some(PredicateType(Arc::new(f)))).map(|x| x.0)
+    recv_msg_with_tag(
+        iter::once(&loc),
+        comm,
+        Some(PredicateType(Arc::new(move |tid, tag| {
+            f(tid, normalize_vec_tag(tag))
+        }))),
+    )
+    .map(|x| x.0)
 }
 
 fn recv_msg_with_tag<'a, T: Message + 'static>(
@@ -1081,8 +1159,27 @@ where
     F: Fn(ThreadId, Option<u32>) -> bool + 'static + Send + Sync,
     T: Message + 'static,
 {
+    recv_vec_tagged_msg_block(move |tid, tag| {
+        let tag = tag.and_then(|tags| tags.first().copied());
+        f(tid, tag)
+    })
+}
+
+/// Returns a message from the queue that matches a vector `tag`
+pub fn recv_vec_tagged_msg_block<F, T>(f: F) -> T
+where
+    F: Fn(ThreadId, Option<Vec<u32>>) -> bool + 'static + Send + Sync,
+    T: Message + 'static,
+{
     let (loc, comm) = self_loc_comm();
-    recv_msg_block_with_tag(iter::once(&loc), comm, Some(PredicateType(Arc::new(f)))).0
+    recv_msg_block_with_tag(
+        iter::once(&loc),
+        comm,
+        Some(PredicateType(Arc::new(move |tid, tag| {
+            f(tid, normalize_vec_tag(tag))
+        }))),
+    )
+    .0
 }
 
 /// Helper function for [`recv_msg_block`] and [`recv_tagged_msg_block`]
@@ -1347,7 +1444,6 @@ pub fn named_nondet(name: &str) -> bool {
         s.must.borrow_mut().handle_ctoss(CToss::new(pos, toss).with_name(name.to_string()))
     })
 }
-	 
 
 use crate::monitor_types::{Monitor, MonitorResult};
 use std::ops::{Range, RangeInclusive};
