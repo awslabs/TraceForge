@@ -1174,7 +1174,7 @@ impl ExecutionGraph {
             if let Some(name) = thread_info.tclab.name() {
                 if name.starts_with("Mutex synchronizer") {
                     mutex_tids.insert(thread_info.tid);
-                } else if name.starts_with("<async_recv-") {
+                } else if name.starts_with("traceforge_runtime::async_recv-") {
                     async_recv_tids.insert(thread_info.tid);
                 }
             }

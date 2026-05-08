@@ -83,8 +83,8 @@ pub struct Stats {
     pub block: usize,
     // Aggregate coverage information
     pub coverage: CoverageInfo,
-    /// Maximum number of events across all complete execution graphs
-    pub max_complete_graph_events: usize,
+    /// Maximum number of events across all execution graphs (complete or blocked)
+    pub max_graph_events: usize,
 }
 
 impl Stats {
@@ -92,8 +92,8 @@ impl Stats {
         self.execs += rhs.execs;
         self.block += rhs.block;
         self.coverage.merge(&rhs.coverage);
-        if rhs.max_complete_graph_events > self.max_complete_graph_events {
-            self.max_complete_graph_events = rhs.max_complete_graph_events;
+        if rhs.max_graph_events > self.max_graph_events {
+            self.max_graph_events = rhs.max_graph_events;
         }
     }
 }

@@ -78,6 +78,8 @@ where
     );
 
     let results = Arc::new(Mutex::new(Vec::new()));
+    let first_panic: Arc<Mutex<Option<Box<dyn std::any::Any + Send>>>> =
+        Arc::new(Mutex::new(None));
 
     // Temporary Must for running end-of-exploration callbacks (not used for exploration itself)
     let must = Rc::new(RefCell::new(Must::new(conf.clone(), false)));
@@ -99,6 +101,7 @@ where
                 f.clone(),
                 actual_pool_size,
                 results.clone(),
+                first_panic.clone(),
             );
         });
     }));
@@ -131,8 +134,13 @@ where
         "Total executions: {} ({} complete, {} blocked)",
         total_execs, total_stats.execs, total_stats.block
     );
-    println!("Max complete graph events: {}", total_stats.max_complete_graph_events);
+    println!("Max graph events: {}", total_stats.max_graph_events);
     println!("=============================================\n");
+
+    // Re-raise the first panic after cleanup so CI sees a non-zero exit code.
+    if let Some(payload) = first_panic.lock().unwrap().take() {
+        std::panic::resume_unwind(payload);
+    }
 
     total_stats
 }
@@ -164,6 +172,7 @@ fn explore_workers_revisit_queue_rayon<'scope, F>(
     f: Arc<F>,
     num_workers: usize,
     results: Arc<Mutex<Vec<(String, Stats)>>>,
+    first_panic: Arc<Mutex<Option<Box<dyn std::any::Any + Send>>>>,
 ) where
     F: Fn() + Send + Sync + 'static,
 {
@@ -235,7 +244,7 @@ fn explore_workers_revisit_queue_rayon<'scope, F>(
     println!("RevisitQueueRayon per-worker stats:");
 
     spawn_batched_tasks(
-        scope, items, &conf, &f, &metrics, &results, interval, batch_size,
+        scope, items, &conf, &f, &metrics, &results, &first_panic, interval, batch_size,
     );
 
     // --- Phase 3: Root continues exploring locally ---
@@ -263,7 +272,7 @@ fn explore_workers_revisit_queue_rayon<'scope, F>(
         let saved = must.borrow_mut().drain_saved_states();
         let surplus = filter_nonempty_work_items(saved);
         spawn_batched_tasks(
-            scope, surplus, &conf, &f, &metrics, &results, interval, batch_size,
+            scope, surplus, &conf, &f, &metrics, &results, &first_panic, interval, batch_size,
         );
     }
 
@@ -278,7 +287,7 @@ fn explore_workers_revisit_queue_rayon<'scope, F>(
             "  root: {} execs, {:.1}s, max_graph_events={}",
             root_execs,
             root_start.elapsed().as_secs_f64(),
-            root_stats.max_complete_graph_events,
+            root_stats.max_graph_events,
         );
     }
     results
@@ -327,6 +336,7 @@ fn rayon_queue_task<'scope, F>(
     f: &Arc<F>,
     metrics: &Arc<RayonQueueMetrics>,
     results: &Arc<Mutex<Vec<(String, Stats)>>>,
+    first_panic: &Arc<Mutex<Option<Box<dyn std::any::Any + Send>>>>,
     interval: usize,
     batch_size: usize,
     task_id: usize,
@@ -399,7 +409,7 @@ fn rayon_queue_task<'scope, F>(
             }
 
             spawn_batched_tasks(
-                scope, surplus_items, conf, f, metrics, results, interval, batch_size,
+                scope, surplus_items, conf, f, metrics, results, first_panic, interval, batch_size,
             );
 
             // If current state has no more revisits, the next try_revisit()
@@ -410,8 +420,13 @@ fn rayon_queue_task<'scope, F>(
         }
     }));
 
-    if let Err(ref e) = explore_result {
+    if let Err(e) = explore_result {
         eprintln!("WARNING: rayon task rt{} panicked: {:?}", task_id, e);
+        // Store the first panic so it can be re-raised after cleanup
+        let mut guard = first_panic.lock().unwrap();
+        if guard.is_none() {
+            *guard = Some(e);
+        }
     }
 
     // --- Teardown: record stats and return Must + pool to caches ---
@@ -422,7 +437,7 @@ fn rayon_queue_task<'scope, F>(
         let label = format!("rt{}", task_id);
         println!(
             "  {}: {} execs, max_graph_events={}",
-            label, total_execs, worker_stats.max_complete_graph_events,
+            label, total_execs, worker_stats.max_graph_events,
         );
         results.lock().unwrap().push((label, worker_stats));
     }
@@ -446,6 +461,7 @@ fn spawn_batched_tasks<'scope, F>(
     f: &Arc<F>,
     metrics: &Arc<RayonQueueMetrics>,
     results: &Arc<Mutex<Vec<(String, Stats)>>>,
+    first_panic: &Arc<Mutex<Option<Box<dyn std::any::Any + Send>>>>,
     interval: usize,
     batch_size: usize,
 ) where
@@ -461,11 +477,13 @@ fn spawn_batched_tasks<'scope, F>(
         let f = f.clone();
         let results = results.clone();
         let metrics = metrics.clone();
+        let first_panic = first_panic.clone();
         let child_id = metrics.total_spawned.fetch_add(1, Ordering::Relaxed);
 
         scope.spawn(move |s| {
             rayon_queue_task(
-                s, batch, &conf, &f, &metrics, &results, interval, batch_size, child_id,
+                s, batch, &conf, &f, &metrics, &results, &first_panic, interval, batch_size,
+                child_id,
             );
         });
     }

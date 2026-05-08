@@ -140,7 +140,7 @@ pub(crate) struct Must {
     // Cache for global named choices: once resolved, the same value is returned for all threads
     pub(crate) global_named_choices: HashMap<String, bool>,
     // Maximum number of events across all complete (non-blocked) execution graphs
-    max_complete_graph_events: usize,
+    max_graph_events: usize,
 }
 
 impl Must {
@@ -175,7 +175,7 @@ impl Must {
             next_thread_index: HashMap::new(),
             choice_occurrence_counters: HashMap::new(),
             global_named_choices: HashMap::new(),
-            max_complete_graph_events: 0,
+            max_graph_events: 0,
         }
     }
 
@@ -326,7 +326,7 @@ impl Must {
         self.started_at = Instant::now();
         self.choice_occurrence_counters.clear();
         self.global_named_choices.clear();
-        self.max_complete_graph_events = 0;
+        self.max_graph_events = 0;
         // Reset telemetry so stats() starts from zero for this task.
         self.telemetry = Telemetry::new(self.config.keep_per_execution_coverage);
         let _ = self.telemetry.register_counter(&EXECS.to_owned());
@@ -1091,8 +1091,8 @@ impl Must {
             if self.is_consistent() {
                 self.telemetry.counter(BLOCKED.to_owned()); // increment BLOCKED
                 let event_count: usize = self.current.graph.threads.iter().map(|t| t.labels.len()).sum();
-                if event_count > self.max_complete_graph_events {
-                    self.max_complete_graph_events = event_count;
+                if event_count > self.max_graph_events {
+                    self.max_graph_events = event_count;
                 }
                 if self.config.verbose >= 2 {
                     println!("One more blocked execution");
@@ -1103,8 +1103,8 @@ impl Must {
         } else if self.is_consistent() {
             self.telemetry.counter(EXECS.to_owned()); // increment EXECS
             let event_count: usize = self.current.graph.threads.iter().map(|t| t.labels.len()).sum();
-            if event_count > self.max_complete_graph_events {
-                self.max_complete_graph_events = event_count;
+            if event_count > self.max_graph_events {
+                self.max_graph_events = event_count;
             }
             self.print_turmoil_trace();
             if self.config.verbose >= 1 {
@@ -1783,7 +1783,7 @@ impl Must {
             execs: self.telemetry.read_counter(EXECS.into()).unwrap_or(0) as usize,
             block: self.telemetry.read_counter(BLOCKED.into()).unwrap_or(0) as usize,
             coverage: self.telemetry.coverage.export_aggregate().into(),
-            max_complete_graph_events: self.max_complete_graph_events,
+            max_graph_events: self.max_graph_events,
         }
     }
 
