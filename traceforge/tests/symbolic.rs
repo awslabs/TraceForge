@@ -427,3 +427,20 @@ fn symbolic_var_ids_are_stable_across_different_schedule_orders() {
     assert_eq!(ids_by_role["right"].len(), 1, "{ids_by_role:#?}");
     assert_ne!(ids_by_role["left"], ids_by_role["right"],);
 }
+
+#[test]
+fn symbolic_nested_quantifier_capture_of_outer_var_is_not_rebound() {
+    let stats = verify(symbolic_keep_going_config(), || {
+        symbolic::assert(symbolic::exists(
+            [("b", symbolic::SymSort::Bool)],
+            |outer| {
+                let b = outer.get("b");
+                outer.forall([("c", symbolic::SymSort::Bool)], |inner| {
+                    b.clone().equals(inner.get("c"))
+                })
+            },
+        ));
+    });
+
+    assert_eq!((stats.execs, stats.block), (0, 1));
+}

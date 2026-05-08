@@ -28,7 +28,7 @@ use std::time::Instant;
 use crate::msg::Message;
 use crate::thread::{main_thread_id, ThreadId};
 
-use crate::symbolic::{SymVarId, SymbolicSolver};
+use crate::symbolic::SymbolicSolver;
 
 use crate::monitor_types::{EndCondition, ExecutionEnd, Monitor, MonitorResult};
 use std::any::TypeId;

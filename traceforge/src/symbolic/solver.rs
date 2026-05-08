@@ -1,8 +1,9 @@
 use crate::symbolic::{BoundVar, BoundVarId, SymExpr, SymFunc, SymSort};
+use std::collections::HashMap;
 use z3::ast::{Ast, Bool, Dynamic, Int};
 use z3::{FuncDecl, Sort, Symbol};
 
-type BoundEnv = Vec<Vec<Dynamic>>;
+type BoundEnv = HashMap<BoundVarId, Dynamic>;
 
 pub(crate) struct SymbolicSolver {
     solver: z3::Solver,
@@ -56,7 +57,7 @@ impl SymbolicSolver {
     }
 
     fn compile_bool(&self, expr: &SymExpr) -> Bool {
-        self.compile_bool_with_env(expr, &mut Vec::new())
+        self.compile_bool_with_env(expr, &mut HashMap::new())
     }
 
     fn compile_bool_with_env(&self, expr: &SymExpr, env: &mut BoundEnv) -> Bool {
@@ -246,15 +247,22 @@ impl SymbolicSolver {
             .iter()
             .map(|var| {
                 let sort = self.compile_sort(var.sort());
-                Dynamic::new_const(format!("q_{}_{}", var.name(), env.len()), &sort)
+                Dynamic::new_const(
+                    format!("q_{}_{}_{}", var.name(), var.id().scope(), var.id().index()),
+                    &sort,
+                )
             })
             .collect::<Vec<_>>();
 
-        env.push(z3_vars.clone());
+        for (var, z3_var) in vars.iter().zip(z3_vars.iter()) {
+            env.insert(var.id(), z3_var.clone());
+        }
 
         let body = self.compile_bool_with_env(body, env);
 
-        env.pop();
+        for var in vars {
+            env.remove(&var.id());
+        }
 
         let var_refs = z3_vars
             .iter()
@@ -269,12 +277,7 @@ impl SymbolicSolver {
     }
 
     fn lookup_bound(&self, env: &BoundEnv, id: &BoundVarId) -> Dynamic {
-        let scope_index = env
-            .len()
-            .checked_sub(1 + id.depth())
-            .unwrap_or_else(|| panic!("unbound quantified variable {:?}", id));
-        env.get(scope_index)
-            .and_then(|scope| scope.get(id.index()))
+        env.get(id)
             .cloned()
             .unwrap_or_else(|| panic!("unbound quantified variable {:?}", id))
     }

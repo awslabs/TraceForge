@@ -1,6 +1,8 @@
 use crate::event::Event;
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
 use std::ops::{Add, Div, Mul, Rem, Sub};
+use std::rc::Rc;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SymVarId(Event);
@@ -58,9 +60,9 @@ impl SymFunc {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BoundVarId {
-    depth: usize,
+    scope: usize,
     index: usize,
 }
 
@@ -74,10 +76,14 @@ pub struct BoundVar {
 impl BoundVar {
     pub fn expr(&self) -> SymExpr {
         SymExpr::BoundVar {
-            id: self.id.clone(),
+            id: self.id,
             name: self.name.clone(),
             sort: self.sort.clone(),
         }
+    }
+
+    pub(crate) fn id(&self) -> BoundVarId {
+        self.id
     }
 
     pub fn name(&self) -> &str {
@@ -90,8 +96,8 @@ impl BoundVar {
 }
 
 impl BoundVarId {
-    pub(crate) fn depth(&self) -> usize {
-        self.depth
+    pub(crate) fn scope(&self) -> usize {
+        self.scope
     }
 
     pub(crate) fn index(&self) -> usize {
@@ -100,24 +106,19 @@ impl BoundVarId {
 }
 
 pub struct BoundVars {
-    scopes: Vec<Vec<(String, SymSort)>>,
+    scopes: Vec<Vec<BoundVar>>,
+    next_scope: Rc<Cell<usize>>,
 }
 
 impl BoundVars {
     pub fn get(&self, name: &str) -> SymExpr {
         self.scopes
             .iter()
-            .enumerate()
-            .find_map(|(depth, scope)| {
+            .find_map(|scope| {
                 scope
                     .iter()
-                    .enumerate()
-                    .find(|(_, (var_name, _))| var_name == name)
-                    .map(|(index, (name, sort))| SymExpr::BoundVar {
-                        id: BoundVarId { depth, index },
-                        name: name.clone(),
-                        sort: sort.clone(),
-                    })
+                    .find(|var| var.name() == name)
+                    .map(|var| var.expr())
             })
             .unwrap_or_else(|| panic!("unknown bound variable `{name}`"))
     }
@@ -127,7 +128,7 @@ impl BoundVars {
         vars: [(&str, SymSort); N],
         body: impl FnOnce(&BoundVars) -> SymExpr,
     ) -> SymExpr {
-        quantified_with_scopes(true, &self.scopes, vars, body)
+        quantified_with_scopes(true, &self.scopes, self.next_scope.clone(), vars, body)
     }
 
     pub fn exists<const N: usize>(
@@ -135,7 +136,7 @@ impl BoundVars {
         vars: [(&str, SymSort); N],
         body: impl FnOnce(&BoundVars) -> SymExpr,
     ) -> SymExpr {
-        quantified_with_scopes(false, &self.scopes, vars, body)
+        quantified_with_scopes(false, &self.scopes, self.next_scope.clone(), vars, body)
     }
 }
 
@@ -277,34 +278,34 @@ fn quantified<const N: usize>(
     vars: [(&str, SymSort); N],
     body: impl FnOnce(&BoundVars) -> SymExpr,
 ) -> SymExpr {
-    quantified_with_scopes(is_forall, &[], vars, body)
+    quantified_with_scopes(is_forall, &[], Rc::new(Cell::new(0)), vars, body)
 }
 
 fn quantified_with_scopes<const N: usize>(
     is_forall: bool,
-    outer_scopes: &[Vec<(String, SymSort)>],
+    outer_scopes: &[Vec<BoundVar>],
+    next_scope: Rc<Cell<usize>>,
     vars: [(&str, SymSort); N],
     body: impl FnOnce(&BoundVars) -> SymExpr,
 ) -> SymExpr {
+    let scope = next_scope.get();
+    next_scope.set(scope + 1);
+
     let vars = vars
         .into_iter()
         .enumerate()
         .map(|(index, (name, sort))| BoundVar {
-            id: BoundVarId { depth: 0, index },
+            id: BoundVarId { scope, index },
             name: name.to_string(),
             sort,
         })
         .collect::<Vec<_>>();
 
     let mut scopes = Vec::with_capacity(outer_scopes.len() + 1);
-    scopes.push(
-        vars.iter()
-            .map(|var| (var.name.clone(), var.sort.clone()))
-            .collect(),
-    );
+    scopes.push(vars.clone());
     scopes.extend_from_slice(outer_scopes);
 
-    let bound_vars = BoundVars { scopes };
+    let bound_vars = BoundVars { scopes, next_scope };
     let body = body(&bound_vars);
 
     if is_forall {
