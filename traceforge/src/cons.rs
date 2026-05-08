@@ -1,9 +1,12 @@
 use crate::event::Event;
 use crate::event_label::{AsEventLabel, LabelEnum, RecvMsg, SendMsg};
+use crate::future::PollerMsg;
 use crate::exec_graph::ExecutionGraph;
 use crate::loc::CommunicationModel;
 use crate::revisit::Revisit;
 use crate::vector_clock::VectorClock;
+use crate::loc::WakeMsg;
+use log::debug;
 
 // A generic consistency which will, eventually, support arbitrary
 // communication models, depending on the channel.
@@ -99,6 +102,7 @@ impl Consistency {
         view: Option<(&'a VectorClock, Event)>,
         check_concurrent: bool,
     ) -> impl Iterator<Item = &'a SendMsg> {
+        // println!("====== Started filter sends call");
         let rpos = rlab.pos();
         sends.filter(move |&slab| {
             let spos = slab.pos();
@@ -127,9 +131,11 @@ impl Consistency {
                 })
             } else {
                 // there is no reader, or the reader is *not* in the view (we exclude the receive itself)
+                debug!("Started looking at send {}", slab);
                 match slab.reader() {
                     None => true,
                     Some(reader) => {
+                        debug!("He is received at {:?}", reader);
                         // Check for concurrent receives.
                         // We shouldn't include the receive's rf, i.e. use cached_porf.
 
@@ -145,7 +151,40 @@ impl Consistency {
                                 rlab.pos()
                             );
                         }
-                        reader == rpos || view.is_some_and(|view| !view.0.contains(reader))
+                        reader == rpos
+                            || view.is_some_and(|view| !view.0.contains(reader))
+                            // A send is available if its reader was part of an async
+                            // receive that was subsequently cancelled.
+                            // Exclude internal PollerMsg sends.
+                            || slab.val.as_any_ref().downcast_ref::<PollerMsg>().is_none()
+                                && 
+                               slab.val.as_any_ref().downcast_ref::<WakeMsg>().is_none()
+                                && {
+                                debug!("Inside cancel looking looking at thread with labels {:?}", g.get_thr(&reader.thread).labels);
+                                let cancel_available = g.get_thr(&reader.thread).labels[(reader.index as usize + 1)..]
+                                    .iter()
+                                    .any(|lab| {
+                                        if let LabelEnum::RecvMsg(recv) = lab {
+                                            debug!("Searching for cancel: looking at receive from {:?}", recv.rf());
+                                            recv.rf().is_some_and(|rf| {
+                                                if let LabelEnum::SendMsg(send) = g.label(rf) {
+                                                    debug!("And this send contains the message {:?}", send.val);
+                                                    send.val.as_any_ref().downcast_ref::<PollerMsg>()
+                                                        .is_some_and(|msg| matches!(msg, PollerMsg::Cancel))
+                                                } else {
+                                                    false
+                                                }
+                                            }) && view.is_none_or(|view| view.0.contains(lab.pos()))
+                                        } else {
+                                            false
+                                        }
+                                    });
+                                if cancel_available {
+                                    debug!("[cancel_path] send {} (reader={}) made available via cancel path", spos, reader);
+                                    slab.push_cancelled_recv_reader(reader);
+                                }
+                                cancel_available
+                            }
                     }
                 }
             }
@@ -368,9 +407,22 @@ impl Consistency {
         // hypothetical [rev.rev -> rlab] revisit
         let view = g.revisit_view(&Revisit::new(rlab.pos(), rev.rev));
 
-        // First (non-revisit) is the maximal one.
-        rlab.rf().unwrap()
-            == self.coherent_rfs_in_view(g, Some((&view, rev.rev)), rlab, porf_override, false)[0]
+        // First (non-revisit) is the maximal one
+        // Or this reads from a send which is read by some cancelled async receive 
+        // whose cancel message has not been replayed yet 
+        // (this is possible because handling concurrent threads can start before finishing replaying)
+        {
+            let rfs = self.coherent_rfs_in_view(g, Some((&view, rev.rev)), rlab, porf_override, false);
+            if rfs.is_empty() {
+                rlab.rf().is_some_and(|rf| {
+                    g.send_label(rf).is_some_and(|slab| {
+                        slab.reader().is_some_and(|r| r != rlab.pos())
+                    })
+                })
+            } else {
+                rlab.rf().unwrap() == rfs[0]
+            }
+        }
     }
 
     /// Returns the rf options for rlab, with the first being the non-revisit rf step

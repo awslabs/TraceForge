@@ -2,7 +2,8 @@ use crate::cons::Consistency;
 use crate::event::Event;
 use crate::exec_graph::ExecutionGraph;
 use crate::exec_pool::ExecutionPool;
-use crate::loc::Loc;
+use crate::future::PollerMsg;
+use crate::loc::{Loc, WakeMsg};
 use crate::revisit::{Revisit, RevisitEnum};
 use crate::runtime::failure::init_panic_hook;
 use crate::runtime::task::TaskId;
@@ -14,7 +15,7 @@ use crate::{Config, ExplorationMode, SchedulePolicy, Stats};
 use log::{debug, info, trace, warn};
 use rand::distr::Distribution;
 use rand::seq::IndexedRandom;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rand_pcg::Pcg64Mcg;
 
 use core::panic;
@@ -43,6 +44,7 @@ macro_rules! cast {
         if let $pat(a) = $target {
             a
         } else {
+            std::io::stderr().flush().unwrap();
             panic!("mismatch variant when cast to {}", stringify!($pat));
         }
     }};
@@ -125,15 +127,21 @@ pub(crate) struct Must {
 
     // Named nondeterministic choice support
     // Per-choice-name thread indexing: each choice name has independent thread indices
-    // Frozen mapping from first execution, used to ensure consistent thread indices across all executions
-    pub(crate) frozen_thread_index_map: Option<HashMap<String, HashMap<ThreadId, usize>>>,
+    // Frozen mapping used to ensure consistent thread indices across all executions.
+    // Keys are origination_vecs (spawn lineage paths) which are stable across executions,
+    // unlike ThreadIds which can change when scheduling decisions differ.
+    pub(crate) frozen_thread_index_map: Option<HashMap<String, HashMap<Vec<u32>, usize>>>,
     // Current execution's mapping (built during first execution, then copied from frozen)
-    // Map: choice_name -> (ThreadId -> thread_idx)
-    pub(crate) thread_index_map: HashMap<String, HashMap<ThreadId, usize>>,
+    // Map: choice_name -> (origination_vec -> thread_idx)
+    pub(crate) thread_index_map: HashMap<String, HashMap<Vec<u32>, usize>>,
     // Next available index for each choice name
     pub(crate) next_thread_index: HashMap<String, usize>,
     // Per-execution counters: (choice_name, thread_idx) -> occurrence count
     pub(crate) choice_occurrence_counters: HashMap<(String, usize), usize>,
+    // Cache for global named choices: once resolved, the same value is returned for all threads
+    pub(crate) global_named_choices: HashMap<String, bool>,
+    // Maximum number of events across all complete (non-blocked) execution graphs
+    max_graph_events: usize,
 }
 
 impl Must {
@@ -167,6 +175,8 @@ impl Must {
             thread_index_map: HashMap::new(),
             next_thread_index: HashMap::new(),
             choice_occurrence_counters: HashMap::new(),
+            global_named_choices: HashMap::new(),
+            max_graph_events: 0,
         }
     }
 
@@ -191,6 +201,7 @@ impl Must {
         self.thread_index_map.clear();
         self.next_thread_index.clear();
         self.choice_occurrence_counters.clear();
+        self.global_named_choices.clear();
 
     }
 
@@ -236,6 +247,7 @@ impl Must {
         }
 
         must.choice_occurrence_counters.clear();
+        must.global_named_choices.clear();
 
         // TODO: when must is borrowed, the panic handler cannot capture
         // a counterexample. run_metrics_before() invokes must model code
@@ -303,6 +315,63 @@ impl Must {
         self.current.graph = eg;
     }
 
+    /// Cheaply reset a Must instance for reuse by a new parallel task.
+    /// Clears accumulated state (counters, states, monitors, telemetry)
+    /// so stats start fresh for this task.
+    pub(crate) fn reset_for_reuse(&mut self) {
+        self.states.clear();
+        self.current = MustState::new();
+        self.monitors.clear();
+        self.stop = false;
+        self.published_values.clear();
+        self.started_at = Instant::now();
+        self.choice_occurrence_counters.clear();
+        self.global_named_choices.clear();
+        self.max_graph_events = 0;
+        // Reset telemetry so stats() starts from zero for this task.
+        self.telemetry = Telemetry::new(self.config.keep_per_execution_coverage);
+        let _ = self.telemetry.register_counter(&EXECS.to_owned());
+        let _ = self.telemetry.register_counter(&BLOCKED.to_owned());
+        let _ = self.telemetry.register_histogram(&EXECS_EST.to_owned());
+        // Note: frozen_thread_index_map, thread_index_map, next_thread_index,
+        // config, rng are intentionally NOT reset — they are either set
+        // explicitly by the caller (frozen map) or persist across tasks.
+    }
+
+    /// Drain only the saved states (not current). Returns them as work items.
+    /// Current state remains in place, untouched.
+    pub(crate) fn drain_saved_states(&mut self) -> Vec<(ExecutionGraph, RQueue)> {
+        self.states
+            .drain(..)
+            .map(|state| (state.graph, state.rqueue))
+            .collect()
+    }
+
+    /// Check if the current state's revisit queue is empty.
+    pub(crate) fn current_rqueue_empty(&self) -> bool {
+        self.current.rqueue.is_empty()
+    }
+
+    /// Load a state stack with partitioned queues (for parallel workers).
+    /// Each state gets its graph and a partitioned subset of its revisits.
+    pub(crate) fn load_state_stack(&mut self, mut stack: Vec<(ExecutionGraph, RQueue)>) {
+        self.states.clear();
+
+        if stack.is_empty() {
+            return;
+        }
+
+        // Pop the last entry — it becomes current
+        let (last_graph, last_rqueue) = stack.pop().unwrap();
+        self.current.graph = last_graph;
+        self.current.rqueue = last_rqueue;
+
+        // Remaining entries become saved states (moved, not cloned)
+        for (graph, rqueue) in stack {
+            self.states.push(MustState { graph, rqueue });
+        }
+    }
+
     /// Add the replay information to a fresh instance of Must
     pub(crate) fn load_replay_information(&mut self, replay_info: REPLAY::ReplayInformation) {
         self.replay_info = replay_info;
@@ -355,6 +424,7 @@ impl Must {
                     info!("|| Consuming {}", label);
                     self.replay_info.reset_current_event();
                 } else {
+                    std::io::stderr().flush().unwrap();
                     panic!(
                         "Replay failure: Executing {} instead of the counterexample's {}",
                         label.pos(),
@@ -368,6 +438,7 @@ impl Must {
     /// This function tries to consume the current event (if possible)
     /// and updates the graph with any field that was lost during (de)serialization.
     fn process_event(&mut self, label: LabelEnum) {
+        self.current.graph.unreplayed_events.remove(&label.pos());
         self.try_consume(&label);
         self.recover_lost_data(label);
     }
@@ -390,6 +461,58 @@ impl Must {
             let lab = LabelEnum::RecvMsg(rlab);
             self.current.graph.validate_replay_event(&lab);
             self.process_event(lab);
+
+            // If the send that R reads from has a different reader R', assert that
+            // R' is in a cancelled async receive, then fix up the reader.
+            let g = &mut self.current.graph;
+            let rlab = g.recv_label(pos).unwrap();
+            if let Some(send_pos) = rlab.rf() {
+                let slab = g.send_label(send_pos).unwrap();
+                if let Some(reader) = slab.reader() {
+                    if reader != pos {
+                        // Verify R' is in a cancelled async receive (same check as cons.rs),
+                        // OR that the mismatch is due to monitor message tracking.
+                        // not a PollerMsg/WakeMsg, and a later event on R's thread reads
+                        // from a PollerMsg::Cancel.
+                        assert!(
+                            slab.is_monitored_from(&pos.thread)
+                            || slab.is_monitored_from(&reader.thread)
+                            || (slab.val.as_any_ref().downcast_ref::<PollerMsg>().is_none()
+                            && slab.val.as_any_ref().downcast_ref::<WakeMsg>().is_none()
+                            && g.get_thr(&reader.thread).labels[(reader.index as usize + 1)..]
+                                .iter()
+                                .any(|lab| {
+                                    if let LabelEnum::RecvMsg(recv) = lab {
+                                        recv.rf().is_some_and(|rf| {
+                                            if let LabelEnum::SendMsg(send) = g.label(rf) {
+                                                send.val.as_any_ref().downcast_ref::<PollerMsg>()
+                                                    .is_some_and(|msg| matches!(msg, PollerMsg::Cancel))
+                                            } else {
+                                                false
+                                            }
+                                        })
+                                    } else {
+                                        false
+                                    }
+                                })),
+                            "Replay: send {} has reader {} but replaying receive {} and reader is not in a cancelled async receive",
+                            send_pos, reader, pos
+                        );
+                        let slab = g.send_label_mut(send_pos).unwrap();
+                        if slab.is_monitored_from(&pos.thread) {
+                            // Monitor is replaying its receive; add as monitor reader
+                            slab.add_monitor_reader(pos);
+                        } else if slab.is_monitored_from(&reader.thread) {
+                            // Existing reader is a monitor; move it to monitor readers
+                            slab.add_monitor_reader(reader);
+                            slab.set_reader(Some(pos));
+                        } else {
+                            slab.push_cancelled_recv_reader(reader);
+                            slab.set_reader(Some(pos));
+                        }
+                    }
+                }
+            }
 
             let g = &self.current.graph;
             // Fetch it again, it might have been updated
@@ -414,7 +537,7 @@ impl Must {
         let spos = slab.pos();
         let mut stuck: Vec<Event> = Vec::new();
         if self.is_replay(spos) {
-            info!("| Replay Mode for {}", slab);
+            info!("| Replay Mode for {} with reader {:?}", slab, slab.reader());
             let lab = LabelEnum::SendMsg(slab);
             self.current.graph.validate_replay_event(&lab);
             self.process_event(lab);
@@ -473,6 +596,46 @@ impl Must {
         self.current.graph.tid_for_spawn(pos, &origination_vec)
     }
 
+    /// Returns the origination_vec for the given thread.
+    pub(crate) fn thread_origination_vec(&self, tid: ThreadId) -> Vec<u32> {
+        self.current.graph.get_thread_tclab(tid).origination_vec()
+    }
+
+    /// Returns the filtered_origination_vec for the given thread.
+    pub(crate) fn thread_filtered_origination_vec_from_tid(&self, tid: ThreadId) -> Vec<u32> {
+        self.current.graph.get_thread_tclab(tid).filtered_origination_vec()
+    }
+
+    /// Counts the number of TCreate events in the given thread up to and including
+    /// the specified event index, excluding those whose names contain the filter pattern.
+    fn count_filtered_tcreate_events(&self, thread: ThreadId, up_to_index: u32, filter_pattern: &str) -> u32 {
+        let mut count = 0;
+        let thread_size = self.current.graph.thread_size(thread) as u32;
+
+        // Iterate only up to the minimum of up_to_index and the actual thread size - 1
+        // (since we're currently adding a new event at up_to_index, it may not exist yet)
+        let max_idx = up_to_index.min(thread_size.saturating_sub(1));
+
+        for idx in 0..=max_idx {
+            let event = Event::new(thread, idx);
+            if let LabelEnum::TCreate(tclab) = self.current.graph.label(event) {
+                // Check if this thread creation should be counted
+                let should_count = if let Some(ref name) = tclab.name() {
+                    !name.contains(filter_pattern)
+                } else {
+                    // Unnamed threads are counted
+                    true
+                };
+
+                if should_count {
+                    count += 1;
+                }
+            }
+        }
+
+        count
+    }
+
     pub(crate) fn handle_tcreate(
         &mut self,
         tid: ThreadId,
@@ -486,7 +649,16 @@ impl Must {
         let mut origination_vec = parent_tclab.origination_vec();
         origination_vec.push(pos.index);
 
-        let tclab = TCreate::new(pos, tid, name, is_daemon, sym_cid, origination_vec);
+        // Compute filtered_origination_vec
+        let mut filtered_origination_vec = parent_tclab.filtered_origination_vec();
+        let filtered_count = self.count_filtered_tcreate_events(
+            pos.thread,
+            pos.index,
+            crate::FILTERED_THREAD_NAME_PATTERN
+        );
+        filtered_origination_vec.push(filtered_count);
+
+        let tclab = TCreate::new(pos, tid, name, is_daemon, sym_cid, origination_vec, filtered_origination_vec);
 
         if self.is_replay(pos) {
             info!("| Replay Mode for {}", tclab);
@@ -579,6 +751,7 @@ impl Must {
             if let LabelEnum::CToss(tclab) = self.current.graph.label(ctlab.pos()) {
                 return tclab.result();
             }
+            std::io::stderr().flush().unwrap();
             panic!();
         }
         info!("| Handle Mode for {}", ctlab);
@@ -641,6 +814,7 @@ impl Must {
             if let LabelEnum::Choice(tclab) = self.current.graph.label(chlab.pos()) {
                 return tclab.result();
             }
+            std::io::stderr().flush().unwrap();
             panic!();
         }
         info!("| Handle Mode for {}", chlab);
@@ -761,7 +935,7 @@ impl Must {
                 .find(|(t, i)| self.is_thread_runnable(t, i))
                 .map(|(t, _)| t.to_owned()),
             SchedulePolicy::Arbitrary => runnable
-                .choose_multiple(&mut self.rng, runnable.len())
+                .sample(&mut self.rng, runnable.len())
                 .find(|(t, i)| self.is_thread_runnable(t, i))
                 .map(|(t, _)| t.to_owned()),
         };
@@ -900,17 +1074,39 @@ impl Must {
     }
 
     fn record_ending_telemetry(&mut self, maybe_block: &Option<BlockType>) -> bool {
+        // Debug: print events that were not replayed during this execution.
+        let unreplayed = &self.current.graph.unreplayed_events;
+        if !unreplayed.is_empty() {
+            let mut sorted: Vec<_> = unreplayed.iter().collect();
+            sorted.sort();
+            debug!("[DEBUG] Unreplayed events ({}):", sorted.len());
+            for ev in &sorted {
+                let label = self.current.graph.label(**ev);
+                debug!("  {} -> {}", ev, label);
+            }
+        } else {
+            debug!("[DEBUG] All events were replayed.");
+        }
         let elapsed = Instant::now() - self.started_at;
         if maybe_block.is_some() {
             if self.is_consistent() {
                 self.telemetry.counter(BLOCKED.to_owned()); // increment BLOCKED
+                let event_count: usize = self.current.graph.threads.iter().map(|t| t.labels.len()).sum();
+                if event_count > self.max_graph_events {
+                    self.max_graph_events = event_count;
+                }
                 if self.config.verbose >= 2 {
                     println!("One more blocked execution");
                     println!("{}", self.print_graph(None));
+                    println!("Finished printing graph");
                 }
             }
         } else if self.is_consistent() {
             self.telemetry.counter(EXECS.to_owned()); // increment EXECS
+            let event_count: usize = self.current.graph.threads.iter().map(|t| t.labels.len()).sum();
+            if event_count > self.max_graph_events {
+                self.max_graph_events = event_count;
+            }
             self.print_turmoil_trace();
             if self.config.verbose >= 1 {
                 println!("One more complete execution");
@@ -963,13 +1159,17 @@ impl Must {
 
     pub(crate) fn should_report(n: u64) -> bool {
         if n == 0 {
-            return false; // no progress report at 0.
+            return false;
         }
+        // Cap at every 1M once we reach that scale
+        if n >= 1_000_000 {
+            return n.is_multiple_of(1_000_000);
+        }
+        // Below that, use P-style: report at 1,2,..,9, 10,20,..,90, 100,200,..,900, etc.
         let mut p = n;
         while p.is_multiple_of(10) {
             p /= 10;
         }
-        // If P has only one digit then after removing right zeros, it will be less than 10.
         p < 10
     }
 
@@ -1015,6 +1215,7 @@ impl Must {
                 // Store the replay information first.
                 must.borrow_mut().store_replay_information(None);
                 println!("{}", must.borrow_mut().print_graph(None));
+                std::io::stderr().flush().unwrap();
                 panic!(
                     "\u{1b}[1;31mA monitor returned the message: {}\u{1b}[0m",
                     msg
@@ -1099,6 +1300,7 @@ impl Must {
 
                 self.current.graph.change_rf(pos, Some(rfs[idx]));
             } else {
+                debug!("Forward revisits at {}: {:?}", pos, rfs);
                 self.current.graph.change_rf(pos, Some(rfs[0]));
                 rfs.iter().skip(1).for_each(|&rf| {
                     push_worklist(
@@ -1187,6 +1389,10 @@ impl Must {
         if self.config.mode == ExplorationMode::Estimation {
             self.pick_revisit(revs, pos);
             return;
+        }
+
+        if !revs.is_empty() {
+            debug!("$$$$$$$ Bacward revisits for send at {}: {:?}", pos, revs);
         }
 
         revs.iter().for_each(|&r| {
@@ -1364,6 +1570,7 @@ impl Must {
 
     pub(crate) fn try_revisit(&mut self) -> bool {
         loop {
+            debug!("Finished execution with current rqueue {:?}", self.current.rqueue.clone());
             if self.current.rqueue.is_empty() {
                 if self.try_pop_state() {
                     continue;
@@ -1373,8 +1580,6 @@ impl Must {
             let rev = { pop_worklist(&mut self.current.rqueue, self.config.schedule_policy == SchedulePolicy::Arbitrary, &mut self.rng) };
             if self.config.verbose >= 3 {
                 println!("Revisit {} <= {}", rev.pos(), rev.rev());
-                println!("Before graph:");
-                println!("{}", self.current.graph);
             }
             if match &rev {
                 RevisitEnum::ForwardRevisit(r) => self.forward_revisit(r),
@@ -1387,9 +1592,11 @@ impl Must {
 
     fn forward_revisit(&mut self, rev: &Revisit) -> bool {
         info!("================ begin forward_revisit ===================");
+        debug!("[forward_revisit] revisit pos={}, rev={}", rev.pos, rev.rev);
         let lab = self.current.graph.label_mut(rev.pos);
         let pos = lab.pos();
         let stamp = lab.stamp();
+        debug!("[forward_revisit] label={}, stamp={}", lab, stamp);
 
         match lab {
             LabelEnum::CToss(ctlab) => ctlab.set_result(!ctlab.result()),
@@ -1426,6 +1633,8 @@ impl Must {
             _ => panic!(),
         };
         self.current.graph.cut_to_stamp(stamp);
+        debug!("After cut");
+        debug!("{}", self.print_graph(None));
         true
     }
 
@@ -1452,14 +1661,21 @@ impl Must {
             rev
         );
         let v = self.current.graph.revisit_view(rev);
-        let ng = self.current.graph.copy_to_view(&v);
-
+        let mut ng = self.current.graph.copy_to_view(&v);
+        // If any send's reader was set to the revisited receive via
+        // cancelled_recv_readers fallback, update it before change_rf.
+        ng.pop_fallback_readers(rev.pos);
+        // println!("After computing the new graph");
         self.push_state();
         self.current.graph = ng;
 
         self.mark_prefix_non_revisitable(rev.rev);
 
+        // println!("After marking prefix");
+
         self.change_rf(rev);
+
+        // println!("After change rf");
 
         if self.config.verbose >= 3 {
             println!("After backward revisit graph");
@@ -1568,6 +1784,7 @@ impl Must {
             execs: self.telemetry.read_counter(EXECS.into()).unwrap_or(0) as usize,
             block: self.telemetry.read_counter(BLOCKED.into()).unwrap_or(0) as usize,
             coverage: self.telemetry.coverage.export_aggregate().into(),
+            max_graph_events: self.max_graph_events,
         }
     }
 
@@ -1608,7 +1825,11 @@ impl Must {
     }
 
     pub(crate) fn print_graph(&self, pos: Option<Event>) -> String {
-        let out = format!("{}", self.current.graph);
+        let out = if self.config.pretty_graph_printing {
+            format!("{}", self.current.graph.pretty_display())
+        } else {
+            format!("{}", self.current.graph)
+        };
         if self.config.dot_file.is_some() {
             self.print_graph_dot(pos)
                 .expect("could not dot-print to supplied file");
@@ -1617,7 +1838,7 @@ impl Must {
             self.print_graph_trace(pos)
                 .expect("could not print trace to supplied file");
         }
-
+        
         out
     }
 

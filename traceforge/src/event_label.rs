@@ -11,6 +11,7 @@ use crate::msg::Val;
 use crate::thread::main_thread_id;
 use crate::vector_clock::VectorClock;
 use crate::ThreadId;
+use log::debug;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) enum LabelEnum {
@@ -541,6 +542,7 @@ pub(crate) struct TCreate {
     is_daemon: bool,
     sym_cid: Option<ThreadId>,
     origination_vec: Vec<u32>,
+    filtered_origination_vec: Vec<u32>,
 }
 
 impl TCreate {
@@ -551,6 +553,7 @@ impl TCreate {
         is_daemon: bool,
         sym_cid: Option<ThreadId>,
         origination_vec: Vec<u32>,
+        filtered_origination_vec: Vec<u32>,
     ) -> Self {
         Self {
             label: EventLabel::new(pos),
@@ -559,6 +562,7 @@ impl TCreate {
             is_daemon,
             sym_cid,
             origination_vec,
+            filtered_origination_vec,
         }
     }
 
@@ -581,6 +585,10 @@ impl TCreate {
 
     pub(crate) fn origination_vec(&self) -> Vec<u32> {
         self.origination_vec.clone()
+    }
+
+    pub(crate) fn filtered_origination_vec(&self) -> Vec<u32> {
+        self.filtered_origination_vec.clone()
     }
 }
 
@@ -757,6 +765,12 @@ pub(crate) struct SendMsg {
     reader: Option<Event>,
     /// Monitor receives that currently read from this send.
     monitor_readers: Vec<Event>,
+    /// Receives in cancelled asyncs that read from this send.
+    /// Used as fallback when the primary reader is deleted during backward revisits.
+    /// RefCell for interior mutability: populated during filter_available_sends_in_view
+    /// where we only have &SendMsg.
+    #[serde(skip)]
+    cancelled_recv_readers: std::cell::RefCell<Vec<Event>>,
     /// Monitor threads that accept this message,
     /// and the respective value they would observe.
     #[serde(skip)]
@@ -783,6 +797,7 @@ impl SendMsg {
             reader: None,
             monitor_readers: Vec::new(),
             monitor_sends,
+            cancelled_recv_readers: std::cell::RefCell::new(Vec::new()),
         }
     }
 
@@ -887,6 +902,7 @@ impl SendMsg {
     }
 
     pub(crate) fn set_reader(&mut self, reader: Option<Event>) {
+        debug!("Setting reader of {} to {:?}", self.label, reader);
         self.reader = reader
     }
 
@@ -900,6 +916,37 @@ impl SendMsg {
     }
     pub(crate) fn can_be_read_from(&self, reader_loc: &RecvLoc) -> bool {
         self.is_unread() && reader_loc.matches(self)
+    }
+
+    pub(crate) fn push_cancelled_recv_reader(&self, reader: Event) {
+        self.cancelled_recv_readers.borrow_mut().push(reader);
+    }
+
+    pub(crate) fn last_cancelled_recv_reader_not_in(&self, deleted: &[Event]) -> Option<Event> {
+        self.cancelled_recv_readers
+            .borrow()
+            .iter()
+            .rev()
+            .find(|e| !deleted.contains(e))
+            .copied()
+    }
+
+    pub(crate) fn pop_cancelled_recv_reader(&self) -> Option<Event> {
+        self.cancelled_recv_readers.borrow_mut().pop()
+    }
+
+    pub(crate) fn remove_from_cancelled_recv_readers(&self, deleted: &[Event]) {
+        self.cancelled_recv_readers
+            .borrow_mut()
+            .retain(|e| !deleted.contains(e));
+    }
+
+    pub(crate) fn first_cancelled_recv_reader(&self) -> Option<Event> {
+        self.cancelled_recv_readers.borrow().first().copied()
+    }
+
+    pub(crate) fn clear_cancelled_recv_readers(&self) {
+        self.cancelled_recv_readers.borrow_mut().clear();
     }
 
     pub(crate) fn monitor_readers(&self) -> &Vec<Event> {
@@ -986,6 +1033,7 @@ pub(crate) struct CToss {
     result: bool,
     predetermined: bool,
     maximal: bool,
+    name: Option<String>,
 }
 
 impl CToss {
@@ -995,7 +1043,13 @@ impl CToss {
             result: init_value,
             predetermined: false,
             maximal: init_value,
+            name: None,
         }
+    }
+
+    pub(crate) fn with_name(mut self, name: String) -> Self {
+        self.name = Some(name);
+        self
     }
 
     pub(crate) fn result(&self) -> bool {
@@ -1023,7 +1077,11 @@ as_label!(CToss);
 
 impl fmt::Display for CToss {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: NONDET {}", self.as_event_label(), self.result())
+        if let Some(ref name) = self.name {
+            write!(f, "{}: NONDET({}) {}", self.as_event_label(), name, self.result())
+        } else {
+            write!(f, "{}: NONDET {}", self.as_event_label(), self.result())
+        }
     }
 }
 

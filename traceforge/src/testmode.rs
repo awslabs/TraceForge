@@ -3,7 +3,7 @@ use std::{cell::RefCell, rc::Rc, sync::Arc};
 use crate::{must::Must, Config, SchedulePolicy, Stats};
 use crate::runtime::thread::continuation::{ContinuationPool, CONTINUATION_POOL};
 
-use rand::{prelude::*, RngCore};
+use rand::prelude::*;
 use rand_pcg::Pcg64Mcg;
 
 /// `verify` tries to systematically explore the state space until completion. For preliminary analysis,

@@ -212,6 +212,7 @@ impl<T: Message + Clone + 'static> Receiver<T> {
 pub type Channel<T> = (Sender<T>, Receiver<T>);
 
 // Hacky way for async_recv's cancel
+#[allow(dead_code)]
 pub(crate) fn from_receiver<T: Message + 'static>(recv: Receiver<T>) -> Sender<T> {
     Sender::new(recv.inner, recv.comm)
 }

@@ -306,6 +306,7 @@ fn two_pc_monitored(num_ps: u32, cons_type: ConsType, policy: SchedulePolicy, mo
         let stats = traceforge::verify(
             Config::builder()
                 .with_cons_type(cons_type)
+                .with_verbose(20)
                 .with_policy(if i == 0 { SchedulePolicy::LTR } else { policy })
                 .build(),
             move || {

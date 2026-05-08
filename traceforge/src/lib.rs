@@ -3,6 +3,8 @@ pub mod channel;
 mod cons;
 pub mod coverage;
 pub use coverage::{CoverageInfo, ExecutionId};
+pub mod parallel_verify;
+pub use parallel_verify::verify_partitioned_rayon;
 
 mod event;
 mod event_label;
@@ -39,7 +41,7 @@ use event_label::{Block, BlockType, CToss, Choice, RecvMsg, SendMsg};
 use loc::{CommunicationModel, Loc, RecvLoc, SendLoc};
 use msg::Message;
 
-use rand::{distr::Distribution, rngs::OsRng, TryRngCore};
+use rand::{distr::Distribution, Rng};
 use replay::ReplayInformation;
 use runtime::execution::{Execution, ExecutionState};
 use runtime::failure::persist_task_failure;
@@ -56,6 +58,7 @@ use std::iter;
 use std::rc::Rc;
 use std::time::Instant;
 use thread::{spawn_without_switch, JoinHandle, ThreadId};
+use std::io::Write;
 
 use crate::event_label::*;
 use crate::exec_pool::ExecutionPool;
@@ -68,6 +71,10 @@ fn type_of<T>(_: &T) -> &'static str {
     type_name::<T>()
 }
 
+/// Filter pattern for thread names when computing filtered origination vectors.
+/// Threads whose names contain this string will be excluded from the count.
+pub const FILTERED_THREAD_NAME_PATTERN: &str = "traceforge";
+
 /// TraceForge exploration statistics.
 #[derive(Default, Clone, Debug)]
 pub struct Stats {
@@ -77,6 +84,8 @@ pub struct Stats {
     pub block: usize,
     // Aggregate coverage information
     pub coverage: CoverageInfo,
+    /// Maximum number of events across all execution graphs (complete or blocked)
+    pub max_graph_events: usize,
 }
 
 impl Stats {
@@ -84,6 +93,9 @@ impl Stats {
         self.execs += rhs.execs;
         self.block += rhs.block;
         self.coverage.merge(&rhs.coverage);
+        if rhs.max_graph_events > self.max_graph_events {
+            self.max_graph_events = rhs.max_graph_events;
+        }
     }
 }
 
@@ -98,6 +110,23 @@ pub enum SchedulePolicy {
     LTR,
     /// arbitrary
     Arbitrary,
+}
+
+/// Branching strategy for parallel verification.
+///
+/// Controls how work is partitioned when spawning parallel exploration tasks.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum BranchingStrategy {
+    /// Uses rayon's built-in work-stealing instead of a manual shared queue.
+    /// Surplus work items are spawned as rayon tasks via `scope.spawn()`.
+    /// Each rayon thread reuses a thread-local Must instance.
+    RevisitQueueRayon,
+}
+
+impl Default for BranchingStrategy {
+    fn default() -> Self {
+        BranchingStrategy::RevisitQueueRayon
+    }
 }
 
 /// Available TraceForge modes. These are not set directly
@@ -204,8 +233,16 @@ pub struct Config {
     pub(crate) turmoil_trace_file: Option<String>,
     pub(crate) parallel: bool,
     pub(crate) parallel_workers: Option<usize>,
+    pub(crate) partitioned_parallelization: bool,
+    pub(crate) partitioned_num_threads: Option<usize>,
+    pub(crate) partitioned_branching: BranchingStrategy,
+    pub(crate) warmup: usize,
+    pub(crate) iterations_until_split: usize,
+    pub(crate) state_batch_size: usize,
     pub(crate) keep_per_execution_coverage: bool,
     pub(crate) predetermined_choices: HashMap<String, Vec<Vec<bool>>>,
+    pub(crate) predetermined_global_choices: HashMap<String, bool>,
+    pub(crate) pretty_graph_printing: bool,
     #[serde(skip)]
     pub(crate) callbacks: Arc<Mutex<Vec<Box<dyn ExecutionObserver + Send>>>>,
 }
@@ -256,7 +293,7 @@ impl ConfigBuilder {
             schedule_policy: SchedulePolicy::LTR,
             max_iterations: None,
             verbose: 0,
-            seed: OsRng.try_next_u64().expect("OsRng failed"),
+            seed: rand::rng().next_u64(),
             symmetry: false,
             vr: false,
             lossy_budget: 0,
@@ -266,8 +303,16 @@ impl ConfigBuilder {
             turmoil_trace_file: None,
             parallel: false,
             parallel_workers: None,
+            partitioned_parallelization: false,
+            partitioned_num_threads: None,
+            partitioned_branching: BranchingStrategy::default(),
+            warmup: 100,
+            iterations_until_split: 100,
+            state_batch_size: 1,
             keep_per_execution_coverage: false,
-            predetermined_choices: HashMap::new(),
+	        predetermined_choices: HashMap::new(),
+            predetermined_global_choices: HashMap::new(),
+            pretty_graph_printing: false,
             callbacks: Arc::new(Mutex::new(Vec::new())),
         })
     }
@@ -281,9 +326,12 @@ impl ConfigBuilder {
         if self.0.symmetry && self.0.schedule_policy == SchedulePolicy::Arbitrary {
             eprintln!("Symmetry reduction can only be used with LTR!");
             std::process::exit(exitcode::CONFIG);
-        } else {
-            self
         }
+        if self.0.parallel && self.0.partitioned_parallelization {
+            eprintln!("Cannot use both parallel and partitioned_parallelization modes!");
+            std::process::exit(exitcode::CONFIG);
+        }
+        self
     }
 
     /// Determines TraceForge's running mode:
@@ -446,6 +494,55 @@ impl ConfigBuilder {
         self
     }
 
+    /// Enables partitioned parallelization using Rayon work-stealing.
+    /// This is a different parallel strategy than .with_parallel() which uses a shared queue.
+    /// Cannot be used together with .with_parallel(true).
+    pub fn with_partitioned_parallelization(mut self, enabled: bool) -> Self {
+        self.0.partitioned_parallelization = enabled;
+        self
+    }
+
+    /// Sets the number of threads for partitioned parallelization.
+    /// None (default) uses the number of logical CPUs.
+    /// Requires .with_partitioned_parallelization(true).
+    pub fn with_partitioned_num_threads(mut self, num_threads: usize) -> Self {
+        self.0.partitioned_num_threads = Some(num_threads);
+        self
+    }
+
+    /// Sets the branching strategy for partitioned parallelization.
+    /// Default is BranchingStrategy::RevisitQueueRayon.
+    /// Requires .with_partitioned_parallelization(true).
+    pub fn with_partitioned_branching(mut self, branching: BranchingStrategy) -> Self {
+        self.0.partitioned_branching = branching;
+        self
+    }
+
+    /// Sets the number of executions the root worker runs in its initial
+    /// exploration before the first split into parallel tasks. Default is 100.
+    pub fn with_warmup(mut self, n: usize) -> Self {
+        assert!(n > 0, "warmup must be > 0");
+        self.0.warmup = n;
+        self
+    }
+
+    /// Sets the number of executions each worker explores before splitting
+    /// its saved states into new rayon tasks. Default is 100.
+    pub fn with_iterations_until_split(mut self, n: usize) -> Self {
+        assert!(n > 0, "iterations_until_split must be > 0");
+        self.0.iterations_until_split = n;
+        self
+    }
+
+    /// Number of (graph, rqueue) pairs per spawned task in `RevisitQueueRayon`.
+    /// Default is 1. Higher values mean coarser tasks (less spawning overhead,
+    /// but coarser load balancing).
+    pub fn with_state_batch_size(mut self, batch_size: usize) -> Self {
+        assert!(batch_size > 0, "state_batch_size must be > 0");
+        self.0.state_batch_size = batch_size;
+        self
+    }
+
     /// Registers a callback that is called at the end of an execution by the model checker
     ///
     pub fn with_callback(self, cb: Box<dyn ExecutionObserver + Send>) -> Self {
@@ -489,6 +586,28 @@ impl ConfigBuilder {
         self
     }
 
+    /// Sets predetermined values for global named nondeterministic choices.
+    ///
+    /// Unlike `with_predetermined_choices`, global choices return the same value
+    /// for all calls with the same name, regardless of which thread calls it.
+    ///
+    /// Example:
+    /// ```ignore
+    /// let mut global = HashMap::new();
+    /// global.insert("feature_flag".to_string(), true);
+    /// Config::builder().with_predetermined_global_choices(global).build()
+    /// ```
+    pub fn with_predetermined_global_choices(mut self, choices: HashMap<String, bool>) -> Self {
+        self.0.predetermined_global_choices = choices;
+        self
+    }
+
+    /// Enables pretty printing of execution graphs in all output
+    pub fn with_pretty_graph_printing(mut self, pretty: bool) -> Self {
+        self.0.pretty_graph_printing = pretty;
+        self
+    }
+
     /// Consumes the builder and produces the [`Config`]
     pub fn build(self) -> Config {
         self.check_valid().0
@@ -503,8 +622,14 @@ pub fn verify<F>(conf: Config, f: F) -> Stats
 where
     F: Fn() + Send + Sync + 'static,
 {
+    if conf.parallel && conf.partitioned_parallelization {
+        panic!("Cannot use both .with_parallel(true) and .with_partitioned_parallelization(true)");
+    }
+
     let f = Arc::new(f);
-    if conf.parallel {
+    if conf.partitioned_parallelization {
+        parallel_verify::verify_partitioned_rayon(conf, move || f())
+    } else if conf.parallel {
         ExecutionPool::new(&conf).explore(&f)
     } else {
         let must = Rc::new(RefCell::new(Must::new(conf, false)));
@@ -656,7 +781,7 @@ where
 {
     ExecutionState::with(|s| s.must.borrow().validate_monitor_spawn(&s.curr_pos()));
 
-    let jh = spawn_without_switch(monitor_function, None, true, None, None);
+    let jh = spawn_without_switch(monitor_function, Some("traceforge_runtime::monitor".to_string()), true, None, None);
 
     // Register the monitor before calling switch(). You need to register it before
     // calling switch() because during replay, the replay execute the monitor first, find the monitor to
@@ -693,6 +818,7 @@ fn validate_locs(locs: &Vec<&Loc>) {
     for (i, c1) in locs.iter().enumerate() {
         for c2 in locs.iter().skip(i + 1) {
             if c1 == c2 {
+                std::io::stderr().flush().unwrap();
                 panic!("Detected duplicate channel {:?} in select", c1);
             }
         }
@@ -714,6 +840,7 @@ fn expect_msg<T: 'static>(val: Val) -> T {
     match val.as_any().downcast::<T>() {
         Ok(v) => *v,
         Err(_) => {
+            std::io::stderr().flush().unwrap();
             panic!(
                 "wrong message return type; expecting {} but got {}",
                 type_name::<T>(),
@@ -745,6 +872,7 @@ where
     T: Message + Clone + 'static,
 {
     futures::TryFutureExt::unwrap_or_else(spawn_receive(recv), |_| {
+        std::io::stderr().flush().unwrap();
         panic!("Async receive future failed!")
     })
 }
@@ -1155,15 +1283,34 @@ pub fn named_nondet(name: &str) -> bool {
     switch();
     ExecutionState::with(|s| {
         let pos = s.next_pos();
-        let thread_id = pos.thread;
 
         let mut must = s.must.borrow_mut();
 
+        // Global choice path: if this name is configured as a global choice,
+        // return the same value for all threads and all occurrences.
+        if must.config.predetermined_global_choices.contains_key(name) {
+            if let Some(&value) = must.global_named_choices.get(name) {
+                // Already resolved — reuse cached value
+                return must.handle_ctoss_predetermined(CToss::new(pos, value).with_name(name.to_string()), value);
+            }
+            // First call — use the predetermined global value and cache it
+            let value = must.config.predetermined_global_choices[name];
+            must.global_named_choices.insert(name.to_string(), value);
+            return must.handle_ctoss_predetermined(CToss::new(pos, value).with_name(name.to_string()), value);
+        }
+
+        // Use the thread's filtered_origination_vec as the map key instead of ThreadId.
+        // Filtered origination vecs count only thread creations (excluding internal framework threads),
+        // making them more stable across executions than event indices or raw origination vecs.
+        // ThreadIds can change when scheduling decisions differ.
+        let filtered_origination_vec = must.thread_filtered_origination_vec_from_tid(pos.thread);
+        let origination_vec = must.thread_origination_vec(pos.thread); // Keep for debugging output
+
         // Get thread index for this choice name with incremental freezing
         // Each choice name has independent thread indexing
-        // Once a (choice_name, thread_id) pair is assigned an index, it's frozen for the entire exploration
+        // Once a (choice_name, filtered_origination_vec) pair is assigned an index, it's frozen for the entire exploration
         let thread_idx = if let Some(name_map) = must.thread_index_map.get(name) {
-            if let Some(&idx) = name_map.get(&thread_id) {
+            if let Some(&idx) = name_map.get(&filtered_origination_vec) {
                 // Already assigned (and frozen)
                 idx
             } else {
@@ -1175,19 +1322,26 @@ pub fn named_nondet(name: &str) -> bool {
                 must.thread_index_map
                     .entry(name.to_string())
                     .or_insert_with(HashMap::new)
-                    .insert(thread_id, idx);
+                    .insert(filtered_origination_vec.clone(), idx);
 
                 // Immediately freeze this assignment for the rest of the exploration
                 if let Some(ref mut frozen) = must.frozen_thread_index_map {
                     frozen
                         .entry(name.to_string())
                         .or_insert_with(HashMap::new)
-                        .insert(thread_id, idx);
+                        .insert(filtered_origination_vec.clone(), idx);
                     debug!(
-                        "Assigned and froze thread index {} to ThreadId {:?} for choice '{}'",
-                        idx, thread_id, name
+                        "Assigned and froze thread index {} to filtered_origination_vec {:?} (origination_vec {:?}) for choice '{}'",
+                        idx, filtered_origination_vec, origination_vec, name
                     );
                 }
+
+                debug!(
+                    "[named_nondet] Index assignment for choice '{}': \
+                     thread_idx={}, filtered_origination_vec={:?}, origination_vec={:?}, thread={}\n\
+                     Graph:\n{}",
+                    name, idx, filtered_origination_vec, origination_vec, pos.thread, must.print_graph(None)
+                );
 
                 idx
             }
@@ -1198,19 +1352,26 @@ pub fn named_nondet(name: &str) -> bool {
 
             // Add to current execution mapping
             let mut name_map = HashMap::new();
-            name_map.insert(thread_id, idx);
+            name_map.insert(filtered_origination_vec.clone(), idx);
             must.thread_index_map.insert(name.to_string(), name_map);
 
             // Immediately freeze this assignment for the rest of the exploration
             if let Some(ref mut frozen) = must.frozen_thread_index_map {
                 let mut frozen_name_map = HashMap::new();
-                frozen_name_map.insert(thread_id, idx);
+                frozen_name_map.insert(filtered_origination_vec.clone(), idx);
                 frozen.insert(name.to_string(), frozen_name_map);
                 debug!(
-                    "Assigned and froze thread index {} to ThreadId {:?} for choice '{}'",
-                    idx, thread_id, name
+                    "Assigned and froze thread index {} to filtered_origination_vec {:?} (origination_vec {:?}) for choice '{}'",
+                    idx, filtered_origination_vec, origination_vec, name
                 );
             }
+
+            debug!(
+                "[named_nondet] Index assignment for choice '{}': \
+                 thread_idx={}, filtered_origination_vec={:?}, origination_vec={:?}, thread={}\n\
+                 Graph:\n{}",
+                name, idx, filtered_origination_vec, origination_vec, pos.thread, must.print_graph(None)
+            );
 
             idx
         };
@@ -1238,7 +1399,7 @@ pub fn named_nondet(name: &str) -> bool {
                 value, name, thread_idx, current_occurrence
             );
             // Use handle_ctoss_predetermined which now handles both replay and handle modes
-            return must.handle_ctoss_predetermined(CToss::new(pos, value), value);
+            return must.handle_ctoss_predetermined(CToss::new(pos, value).with_name(name.to_string()), value);
         }
 
         // Fallback to nondeterministic exploration (handles both replay and handle modes)
@@ -1246,10 +1407,41 @@ pub fn named_nondet(name: &str) -> bool {
             "Using nondeterministic exploration for choice '{}' [thread_idx={}, occurrence={}]",
             name, thread_idx, current_occurrence
         );
+
+        // Assert: if predetermined choices exist for this choice name but there is
+        // no entry for this thread_idx, something is likely wrong. This can indicate
+        // origination_vec instability: the thread got a shifted filtered_origination_vec, was
+        // assigned a new index beyond the configured predetermined range.
+        if let Some(thread_choices) = must.config.predetermined_choices.get(name) {
+            if thread_choices.get(thread_idx).is_none() {
+                let frozen_map_str = must.frozen_thread_index_map
+                    .as_ref()
+                    .map(|fm| format!("{:#?}", fm))
+                    .unwrap_or_else(|| "None".to_string());
+                std::io::stderr().flush().unwrap();
+                debug!(
+                    "[named_nondet] Choice '{}' has {} predetermined thread entries \
+                     but thread_idx={} has no entry (occurrence={}).\n\
+                     This indicates lack of predetermined values.\n\
+                     Thread: {}\n\
+                     Filtered origination vec: {:?}\n\
+                     Origination vec: {:?}\n\
+                     Frozen thread index map:\n{}\n\
+                     Graph:\n{}",
+                    name, thread_choices.len(), thread_idx, current_occurrence,
+                    pos.thread,
+                    filtered_origination_vec,
+                    origination_vec,
+                    frozen_map_str,
+                    must.print_graph(None)
+                );
+            }
+        }
+
         // Release the mutable borrow so gen_bool() and handle_ctoss() can each borrow independently.
         drop(must);
         let toss = s.must.borrow_mut().gen_bool();
-        s.must.borrow_mut().handle_ctoss(CToss::new(pos, toss))
+        s.must.borrow_mut().handle_ctoss(CToss::new(pos, toss).with_name(name.to_string()))
     })
 }
 
@@ -1451,7 +1643,7 @@ pub fn assert(cond: bool) {
                     println!("{}", must.print_graph(None));
                     // The graph is completely generated, now build the linearization
                     must.store_replay_information(Some(pos));
-
+                    std::io::stderr().flush().unwrap();
                     // Report the failure
                     assert!(cond);
                 }
