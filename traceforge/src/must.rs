@@ -29,6 +29,7 @@ use std::time::Instant;
 use crate::msg::Message;
 use crate::thread::{main_thread_id, ThreadId};
 
+#[cfg(feature = "symbolic")]
 use crate::symbolic::SymbolicSolver;
 
 use crate::monitor_types::{EndCondition, ExecutionEnd, Monitor, MonitorResult};
@@ -140,6 +141,7 @@ pub(crate) struct Must {
     pub(crate) next_thread_index: HashMap<String, usize>,
     // Per-execution counters: (choice_name, thread_idx) -> occurrence count
     pub(crate) choice_occurrence_counters: HashMap<(String, usize), usize>,
+    #[cfg(feature = "symbolic")]
     // Solver for the symbolic constraints in the current execution.
     symbolic_solver: SymbolicSolver,
     // Cache for global named choices: once resolved, the same value is returned for all threads
@@ -179,6 +181,7 @@ impl Must {
             thread_index_map: HashMap::new(),
             next_thread_index: HashMap::new(),
             choice_occurrence_counters: HashMap::new(),
+            #[cfg(feature = "symbolic")]
             symbolic_solver: SymbolicSolver::new(),
             global_named_choices: HashMap::new(),
             max_graph_events: 0,
@@ -206,6 +209,7 @@ impl Must {
         self.thread_index_map.clear();
         self.next_thread_index.clear();
         self.choice_occurrence_counters.clear();
+        #[cfg(feature = "symbolic")]
         self.symbolic_solver.reset();
         self.global_named_choices.clear();
 
@@ -227,6 +231,7 @@ impl Must {
 
     pub(crate) fn begin_execution(must: &Rc<RefCell<Must>>) {
         let mut must = must.borrow_mut();
+        #[cfg(feature = "symbolic")]
         must.symbolic_solver.reset();
         must.current.graph.initialize_for_execution();
         must.telemetry.coverage.new_eid();
@@ -320,6 +325,7 @@ impl Must {
         self.current.rqueue.clear();
         self.states.clear();
         self.current.graph = eg;
+        #[cfg(feature = "symbolic")]
         self.symbolic_solver.reset();
     }
 
@@ -911,6 +917,7 @@ impl Must {
         first
     }
 
+    #[cfg(feature = "symbolic")]
     pub(crate) fn handle_symbolic_var(&mut self, lab: SymbolicVar) {
         if self.is_replay(lab.pos()) {
             let actual = LabelEnum::SymbolicVar(lab);
@@ -922,6 +929,7 @@ impl Must {
         self.add_to_graph(LabelEnum::SymbolicVar(lab));
     }
 
+    #[cfg(feature = "symbolic")]
     pub(crate) fn handle_constraint_eval(&mut self, mut lab: ConstraintEval) -> bool {
         if self.is_replay(lab.pos()) {
             let pos = lab.pos();
@@ -965,6 +973,7 @@ impl Must {
         chosen
     }
 
+    #[cfg(feature = "symbolic")]
     fn add_constraint_to_path_solver(&mut self, c: &ConstraintEval) {
         if c.branch_taken() {
             self.symbolic_solver.assert(c.expr());
@@ -973,6 +982,7 @@ impl Must {
         }
     }
 
+    #[cfg(feature = "symbolic")]
     fn symbolic_solver_for_graph(&self, g: &ExecutionGraph) -> SymbolicSolver {
         let mut solver = SymbolicSolver::new();
 
@@ -997,6 +1007,7 @@ impl Must {
         solver
     }
 
+    #[cfg(feature = "symbolic")]
     fn symbolic_backward_revisit_is_sat(&self, rev: &Revisit) -> bool {
         if !self.config.symbolic {
             return true;
@@ -1009,6 +1020,7 @@ impl Must {
         self.symbolic_solver_for_graph(&g).is_sat()
     }
 
+    #[cfg(feature = "symbolic")]
     fn is_maximal_constraint(&self, c: &ConstraintEval, rev: &Revisit) -> bool {
         let view = self.current.graph.revisit_view(rev);
         let mut g = self.current.graph.copy_to_view(&view);
@@ -1509,8 +1521,17 @@ impl Must {
                 self.checker
                     .is_revisit_consistent(g, rlab, slab, self.is_monitor(&rlab.pos()))
             })
+            .collect::<Vec<_>>();
+
+        #[cfg(feature = "symbolic")]
+        let revs = revs
+            .into_iter()
             // Filter out non maximal revisit w.r.t. condpor
             .filter(|rlab| self.symbolic_backward_revisit_is_sat(&Revisit::new(rlab.pos(), pos)))
+            .collect::<Vec<_>>();
+
+        let revs = revs
+            .into_iter()
             // And again, take while the revisit is maximal (deeper revisits are futile if this fails)
             .take_while(|&rlab| self.is_maximal_extension(&Revisit::new(rlab.pos(), pos)))
             .map(|recv| recv.pos())
@@ -1579,7 +1600,9 @@ impl Must {
             // we handle this via the revisitable flag on the corresponding receive.
             LabelEnum::SendMsg(slab) => !slab.is_dropped(),
             LabelEnum::Choice(chlab) => chlab.result() == *chlab.range().end(),
+            #[cfg(feature = "symbolic")]
             LabelEnum::ConstraintEval(c) => self.is_maximal_constraint(c, rev),
+            #[cfg(feature = "symbolic")]
             LabelEnum::SymbolicVar(_) => true,
             _ => true,
         }
@@ -1768,6 +1791,7 @@ impl Must {
                 slab.set_dropped();
                 self.current.graph.incr_dropped_sends();
             }
+            #[cfg(feature = "symbolic")]
             LabelEnum::ConstraintEval(c) => {
                 c.set_branch_taken(!c.branch_taken());
             }

@@ -1,3 +1,5 @@
+#![cfg(feature = "symbolic")]
+
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use traceforge::{

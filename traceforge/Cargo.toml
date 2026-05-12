@@ -32,7 +32,7 @@ dyn-eq = "0.1.3"
 merging-iterator = "1.3.0"
 bytes = "1.10"
 indexmap = "2.12"
-z3 = "0.19"
+z3 = { version = "0.19", optional = true }
 tokio ={ version = "1.50", features = ["full"] }
 rayon = "1.7"
 
@@ -44,7 +44,15 @@ lazy_static = "1.4.0"
 
 [features]
 default = ["print_vals"]
+symbolic = ["dep:z3"]
 print_stamps = []
 print_vals = []
 print_vals_custom = []
 
+[[example]]
+name = "symbolic_echo"
+required-features = ["symbolic"]
+
+[[test]]
+name = "symbolic"
+required-features = ["symbolic"]
