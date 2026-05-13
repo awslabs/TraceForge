@@ -1172,7 +1172,7 @@ impl ExecutionGraph {
 
         for thread_info in self.threads.iter() {
             if let Some(name) = thread_info.tclab.name() {
-                if name.starts_with("Mutex synchronizer") {
+                if name.starts_with("traceforge_runtime::mutex") {
                     mutex_tids.insert(thread_info.tid);
                 } else if name.starts_with("traceforge_runtime::async_recv-") {
                     async_recv_tids.insert(thread_info.tid);
@@ -1337,10 +1337,11 @@ impl ExecutionGraph {
                                                 };
                                                 writeln!(
                                                     f,
-                                                    "\t{}: {}({})",
+                                                    "\t{}: {}({}, @{})",
                                                     recv.as_event_label(),
                                                     op,
-                                                    mtid
+                                                    mtid,
+                                                    rf.index
                                                 )?;
                                                 skip_next = true;
                                                 continue;
@@ -1382,8 +1383,9 @@ impl ExecutionGraph {
                                         format!("{:?}", send.val().val);
                                     writeln!(
                                         f,
-                                        "\t{}: RECV {} <{}>",
+                                        "\t{}: RECV [rf={}] {} <{}>",
                                         recv.as_event_label(),
+                                        rf,
                                         val_debug,
                                         send.val().type_name
                                     )?;
@@ -1414,8 +1416,9 @@ impl ExecutionGraph {
                                                     );
                                                     writeln!(
                                                         f,
-                                                        "\t{}: RECV {} <{}>",
+                                                        "\t{}: RECV [rf={}] {} <{}>",
                                                         tjoin.as_event_label(),
+                                                        arf,
                                                         val_debug,
                                                         send.val().type_name
                                                     )?;
