@@ -107,10 +107,18 @@ where
     }));
 
     if let Err(ref e) = scope_result {
-        eprintln!(
-            "WARNING: rayon scope panicked (final results will still be printed): {:?}",
-            e
-        );
+        // Extract a human-readable panic message from the payload
+        let panic_msg = if let Some(&s) = e.downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = e.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            format!("{:?}", e)
+        };
+
+        eprintln!("\n!!! PANIC in rayon scope !!!");
+        eprintln!("Panic message: {}", panic_msg);
+        eprintln!("Final results will still be printed below.\n");
     }
 
     // --- Post-exploration: aggregate results ---
@@ -421,7 +429,19 @@ fn rayon_queue_task<'scope, F>(
     }));
 
     if let Err(e) = explore_result {
-        eprintln!("WARNING: rayon task rt{} panicked: {:?}", task_id, e);
+        // Extract a human-readable panic message from the payload
+        let panic_msg = if let Some(&s) = e.downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = e.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            format!("{:?}", e)
+        };
+
+        eprintln!("\n!!! PANIC in rayon task rt{} !!!", task_id);
+        eprintln!("Panic message: {}", panic_msg);
+        eprintln!("This worker will terminate but other workers will continue.\n");
+
         // Store the first panic so it can be re-raised after cleanup
         let mut guard = first_panic.lock().unwrap();
         if guard.is_none() {
