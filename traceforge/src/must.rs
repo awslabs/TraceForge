@@ -29,6 +29,9 @@ use std::time::Instant;
 use crate::msg::Message;
 use crate::thread::{main_thread_id, ThreadId};
 
+#[cfg(feature = "symbolic")]
+use crate::symbolic::SymbolicSolver;
+
 use crate::monitor_types::{EndCondition, ExecutionEnd, Monitor, MonitorResult};
 use std::any::TypeId;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -138,6 +141,9 @@ pub(crate) struct Must {
     pub(crate) next_thread_index: HashMap<String, usize>,
     // Per-execution counters: (choice_name, thread_idx) -> occurrence count
     pub(crate) choice_occurrence_counters: HashMap<(String, usize), usize>,
+    #[cfg(feature = "symbolic")]
+    // Solver for the symbolic constraints in the current execution.
+    symbolic_solver: SymbolicSolver,
     // Cache for global named choices: once resolved, the same value is returned for all threads
     pub(crate) global_named_choices: HashMap<String, bool>,
     // Maximum number of events across all complete (non-blocked) execution graphs
@@ -175,6 +181,8 @@ impl Must {
             thread_index_map: HashMap::new(),
             next_thread_index: HashMap::new(),
             choice_occurrence_counters: HashMap::new(),
+            #[cfg(feature = "symbolic")]
+            symbolic_solver: SymbolicSolver::new(),
             global_named_choices: HashMap::new(),
             max_graph_events: 0,
         }
@@ -201,6 +209,8 @@ impl Must {
         self.thread_index_map.clear();
         self.next_thread_index.clear();
         self.choice_occurrence_counters.clear();
+        #[cfg(feature = "symbolic")]
+        self.symbolic_solver.reset();
         self.global_named_choices.clear();
 
     }
@@ -208,7 +218,7 @@ impl Must {
     pub(crate) fn gen_bool(&mut self) -> bool {
         self.rng.random_range(0..=1) == 0
     }
-	 
+
     pub(crate) fn current() -> Option<Rc<RefCell<Must>>> {
         CURRENT_MUST.with(|current_must| current_must.borrow().clone())
     }
@@ -221,6 +231,8 @@ impl Must {
 
     pub(crate) fn begin_execution(must: &Rc<RefCell<Must>>) {
         let mut must = must.borrow_mut();
+        #[cfg(feature = "symbolic")]
+        must.symbolic_solver.reset();
         must.current.graph.initialize_for_execution();
         must.telemetry.coverage.new_eid();
 
@@ -313,6 +325,8 @@ impl Must {
         self.current.rqueue.clear();
         self.states.clear();
         self.current.graph = eg;
+        #[cfg(feature = "symbolic")]
+        self.symbolic_solver.reset();
     }
 
     /// Cheaply reset a Must instance for reuse by a new parallel task.
@@ -548,7 +562,9 @@ impl Must {
             };
             // The reader might be stuck waiting us, inform caller
             // to handle appropriately (has access to ExecutionState).
-            if let Some(r) = slab.reader() { stuck.push(r) }
+            if let Some(r) = slab.reader() {
+                stuck.push(r)
+            }
             // Similar for monitor readers
             slab.monitor_readers().iter().for_each(|&r| stuck.push(r));
             return stuck;
@@ -799,7 +815,7 @@ impl Must {
         self.add_to_graph(LabelEnum::CToss(ctlab));
         // Note: We don't add a revisit here because the value is predetermined
         value
-    }    
+    }
 
     pub(crate) fn handle_choice(&mut self, chlab: Choice) -> usize {
         let result = chlab.result();
@@ -899,6 +915,130 @@ impl Must {
             );
         }
         first
+    }
+
+    #[cfg(feature = "symbolic")]
+    pub(crate) fn handle_symbolic_var(&mut self, lab: SymbolicVar) {
+        if self.is_replay(lab.pos()) {
+            let actual = LabelEnum::SymbolicVar(lab);
+            self.current.graph.validate_replay_event(&actual);
+            self.process_event(actual);
+            return;
+        }
+
+        self.add_to_graph(LabelEnum::SymbolicVar(lab));
+    }
+
+    #[cfg(feature = "symbolic")]
+    pub(crate) fn handle_constraint_eval(&mut self, mut lab: ConstraintEval) -> bool {
+        if self.is_replay(lab.pos()) {
+            let pos = lab.pos();
+
+            let stored = match self.current.graph.label(pos).clone() {
+                LabelEnum::ConstraintEval(c) => c,
+                other => panic!("expected constraint at {}, got {}", pos, other),
+            };
+
+            let lab = LabelEnum::ConstraintEval(lab.clone());
+            self.current.graph.validate_replay_event(&lab);
+            self.process_event(LabelEnum::ConstraintEval(stored.clone()));
+            self.add_constraint_to_path_solver(&stored);
+            return stored.branch_taken();
+        }
+
+        let true_sat = self.symbolic_solver.sat_with(lab.expr());
+        let false_sat = self.symbolic_solver.sat_with_not(lab.expr());
+
+        if !true_sat && !false_sat {
+            panic!(
+                "both a constraint and its negation are unsatisfiable for {:?}",
+                lab.expr()
+            );
+        }
+
+        let chosen = true_sat;
+        lab.set_branch_taken(chosen);
+
+        let pos = self.add_to_graph(LabelEnum::ConstraintEval(lab.clone()));
+        self.add_constraint_to_path_solver(&lab);
+
+        if true_sat && false_sat {
+            push_worklist(
+                &mut self.current.rqueue,
+                self.current.graph.label(pos).stamp(),
+                RevisitEnum::new_forward(pos, Event::new_init()),
+            );
+        }
+
+        chosen
+    }
+
+    #[cfg(feature = "symbolic")]
+    fn add_constraint_to_path_solver(&mut self, c: &ConstraintEval) {
+        if c.branch_taken() {
+            self.symbolic_solver.assert(c.expr());
+        } else {
+            self.symbolic_solver.assert_not(c.expr());
+        }
+    }
+
+    #[cfg(feature = "symbolic")]
+    fn symbolic_solver_for_graph(&self, g: &ExecutionGraph) -> SymbolicSolver {
+        let mut solver = SymbolicSolver::new();
+
+        let mut labels = g
+            .threads
+            .iter()
+            .flat_map(|t| t.labels.iter())
+            .collect::<Vec<_>>();
+
+        labels.sort_by_key(|lab| lab.stamp());
+
+        for lab in labels {
+            if let LabelEnum::ConstraintEval(c) = lab {
+                if c.branch_taken() {
+                    solver.assert(c.expr());
+                } else {
+                    solver.assert_not(c.expr());
+                }
+            }
+        }
+
+        solver
+    }
+
+    #[cfg(feature = "symbolic")]
+    fn symbolic_backward_revisit_is_sat(&self, rev: &Revisit) -> bool {
+        if !self.config.symbolic {
+            return true;
+        }
+
+        let view = self.current.graph.revisit_view(rev);
+        let mut g = self.current.graph.copy_to_view(&view);
+        g.change_rf(rev.pos, Some(rev.rev));
+
+        self.symbolic_solver_for_graph(&g).is_sat()
+    }
+
+    #[cfg(feature = "symbolic")]
+    fn is_maximal_constraint(&self, c: &ConstraintEval, rev: &Revisit) -> bool {
+        let view = self.current.graph.revisit_view(rev);
+        let mut g = self.current.graph.copy_to_view(&view);
+        g.change_rf(rev.pos, Some(rev.rev));
+
+        let solver = self.symbolic_solver_for_graph(&g);
+
+        let true_sat = solver.sat_with(c.expr());
+        if true_sat {
+            return c.branch_taken();
+        }
+
+        let false_sat = solver.sat_with_not(c.expr());
+        if false_sat {
+            return !c.branch_taken();
+        }
+
+        false
     }
 
     // this checks if the current graph is consistent
@@ -1039,7 +1179,7 @@ impl Must {
     /// Check if the execution is blocked. Return None if it's not blocked, or Some(Block)
     /// to tell why it is blocked.
     fn check_blocked(&mut self) -> Option<BlockType> {
-        self.current.graph.check_blocked()    
+        self.current.graph.check_blocked()
     }
 
     /// `complete_execution` is invoked when a particular single execution has finished.
@@ -1245,7 +1385,7 @@ impl Must {
         }
 
         // Clean up per-execution coverage data after observers have been notified
-	    self.telemetry.coverage.cleanup_current_execution();
+        self.telemetry.coverage.cleanup_current_execution();
     }
 
     fn visit_rfs(&mut self, pos: Event, blocking: bool) -> Option<Val> {
@@ -1381,6 +1521,17 @@ impl Must {
                 self.checker
                     .is_revisit_consistent(g, rlab, slab, self.is_monitor(&rlab.pos()))
             })
+            .collect::<Vec<_>>();
+
+        #[cfg(feature = "symbolic")]
+        let revs = revs
+            .into_iter()
+            // Filter out non maximal revisit w.r.t. condpor
+            .filter(|rlab| self.symbolic_backward_revisit_is_sat(&Revisit::new(rlab.pos(), pos)))
+            .collect::<Vec<_>>();
+
+        let revs = revs
+            .into_iter()
             // And again, take while the revisit is maximal (deeper revisits are futile if this fails)
             .take_while(|&rlab| self.is_maximal_extension(&Revisit::new(rlab.pos(), pos)))
             .map(|recv| recv.pos())
@@ -1449,6 +1600,10 @@ impl Must {
             // we handle this via the revisitable flag on the corresponding receive.
             LabelEnum::SendMsg(slab) => !slab.is_dropped(),
             LabelEnum::Choice(chlab) => chlab.result() == *chlab.range().end(),
+            #[cfg(feature = "symbolic")]
+            LabelEnum::ConstraintEval(c) => self.is_maximal_constraint(c, rev),
+            #[cfg(feature = "symbolic")]
+            LabelEnum::SymbolicVar(_) => true,
             _ => true,
         }
     }
@@ -1577,7 +1732,13 @@ impl Must {
                 }
                 return false;
             }
-            let rev = { pop_worklist(&mut self.current.rqueue, self.config.schedule_policy == SchedulePolicy::Arbitrary, &mut self.rng) };
+            let rev = {
+                pop_worklist(
+                    &mut self.current.rqueue,
+                    self.config.schedule_policy == SchedulePolicy::Arbitrary,
+                    &mut self.rng,
+                )
+            };
             if self.config.verbose >= 3 {
                 println!("Revisit {} <= {}", rev.pos(), rev.rev());
             }
@@ -1629,6 +1790,10 @@ impl Must {
             LabelEnum::SendMsg(slab) => {
                 slab.set_dropped();
                 self.current.graph.incr_dropped_sends();
+            }
+            #[cfg(feature = "symbolic")]
+            LabelEnum::ConstraintEval(c) => {
+                c.set_branch_taken(!c.branch_taken());
             }
             _ => panic!(),
         };
@@ -2046,14 +2211,13 @@ fn pop_worklist(worklist: &mut RQueue, is_arbitrary: bool, rng: &mut Pcg64Mcg) -
             .iter_mut()
             .next_back()
             .expect("worklist is not empty");
-        if !is_arbitrary  {
+        if !is_arbitrary {
             let rev = revs.pop().unwrap();
             (*stamp, rev, revs.is_empty())
-        }
-        else {
+        } else {
             // Choose randomly from alternatives at the highest stamp
-	        let idx = rng.random_range(0..revs.len());
-	        let rev = revs.swap_remove(idx);
+            let idx = rng.random_range(0..revs.len());
+            let rev = revs.swap_remove(idx);
             (*stamp, rev, revs.is_empty())
         }
     };

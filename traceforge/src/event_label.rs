@@ -13,6 +13,9 @@ use crate::vector_clock::VectorClock;
 use crate::ThreadId;
 use log::debug;
 
+#[cfg(feature = "symbolic")]
+use crate::symbolic::{SymExpr, SymSort, SymVarId};
+
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) enum LabelEnum {
     Begin(Begin),
@@ -26,6 +29,11 @@ pub(crate) enum LabelEnum {
     Choice(Choice),
     Sample(Sample),
     Block(Block),
+
+    #[cfg(feature = "symbolic")]
+    SymbolicVar(SymbolicVar),
+    #[cfg(feature = "symbolic")]
+    ConstraintEval(ConstraintEval),
 }
 
 macro_rules! match_and_run {
@@ -42,6 +50,11 @@ macro_rules! match_and_run {
             LabelEnum::Choice(l) => l.as_event_label().$name($($arg),*),
             LabelEnum::Sample(l) => l.as_event_label().$name($($arg),*),
             LabelEnum::Block(l) => l.as_event_label().$name($($arg),*),
+
+            #[cfg(feature = "symbolic")]
+            LabelEnum::SymbolicVar(l) => l.as_event_label().$name($($arg),*),
+            #[cfg(feature = "symbolic")]
+            LabelEnum::ConstraintEval(l) => l.as_event_label().$name($($arg),*),
         }
     };
 }
@@ -60,6 +73,11 @@ macro_rules! match_and_run_mut {
             LabelEnum::Choice(l) => l.as_event_label_mut().$name($($arg),*),
             LabelEnum::Sample(l) => l.as_event_label_mut().$name($($arg),*),
             LabelEnum::Block(l) => l.as_event_label_mut().$name($($arg),*),
+
+            #[cfg(feature = "symbolic")]
+            LabelEnum::SymbolicVar(l) => l.as_event_label_mut().$name($($arg),*),
+            #[cfg(feature = "symbolic")]
+            LabelEnum::ConstraintEval(l) => l.as_event_label_mut().$name($($arg),*),
         }
     };
 }
@@ -242,6 +260,24 @@ impl LabelEnum {
                     return Ok(());
                 }
             }
+            #[cfg(feature = "symbolic")]
+            LabelEnum::SymbolicVar(s) => {
+                if let LabelEnum::SymbolicVar(o) = other {
+                    if s.id != o.id || s.sort != o.sort {
+                        return Err("symbolic variable mismatch".into());
+                    }
+                    return Ok(());
+                }
+            }
+            #[cfg(feature = "symbolic")]
+            LabelEnum::ConstraintEval(s) => {
+                if let LabelEnum::ConstraintEval(o) = other {
+                    if s.expr != o.expr {
+                        return Err("symbolic constraint mismatch".into());
+                    }
+                    return Ok(());
+                }
+            }
         }
 
         if let (LabelEnum::Block(_), LabelEnum::End(_)) = (self, other) {
@@ -289,6 +325,11 @@ impl LabelEnum {
             LabelEnum::Choice(s) => format!("called Range({:?})::nondet", s.range()),
             LabelEnum::Sample(_) => "called sample()".to_string(),
             LabelEnum::Block(_) => "became blocked".to_string(),
+
+            #[cfg(feature = "symbolic")]
+            LabelEnum::SymbolicVar(_) => "declared a symbolic variable".to_string(),
+            #[cfg(feature = "symbolic")]
+            LabelEnum::ConstraintEval(_) => "evaluated a symbolic expression".to_string(),
         }
     }
 }
@@ -307,6 +348,11 @@ impl fmt::Display for LabelEnum {
             LabelEnum::Choice(lab) => write!(f, "{}", lab),
             LabelEnum::Sample(lab) => write!(f, "{}", lab),
             LabelEnum::Block(lab) => write!(f, "{}", lab),
+
+            #[cfg(feature = "symbolic")]
+            LabelEnum::SymbolicVar(lab) => write!(f, "{}", lab),
+            #[cfg(feature = "symbolic")]
+            LabelEnum::ConstraintEval(lab) => write!(f, "{}", lab),
         }
     }
 }
@@ -325,6 +371,11 @@ impl fmt::Debug for LabelEnum {
             LabelEnum::Choice(lab) => write!(f, "{}", lab),
             LabelEnum::Sample(lab) => write!(f, "{}", lab),
             LabelEnum::Block(lab) => write!(f, "{}", lab),
+
+            #[cfg(feature = "symbolic")]
+            LabelEnum::SymbolicVar(lab) => write!(f, "{}", lab),
+            #[cfg(feature = "symbolic")]
+            LabelEnum::ConstraintEval(lab) => write!(f, "{}", lab),
         }
     }
 }
@@ -1222,5 +1273,94 @@ as_label!(Block);
 impl fmt::Display for Block {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: BLK {:?}", self.as_event_label(), self.btype())
+    }
+}
+
+#[cfg(feature = "symbolic")]
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct SymbolicVar {
+    label: EventLabel,
+    id: SymVarId,
+    sort: SymSort,
+}
+
+#[cfg(feature = "symbolic")]
+impl SymbolicVar {
+    pub(crate) fn new(pos: Event, id: SymVarId, sort: SymSort) -> Self {
+        Self {
+            label: EventLabel::new(pos),
+            id,
+            sort,
+        }
+    }
+
+    pub(crate) fn id(&self) -> SymVarId {
+        self.id.clone()
+    }
+    pub(crate) fn sort(&self) -> &SymSort {
+        &self.sort
+    }
+}
+
+#[cfg(feature = "symbolic")]
+as_label!(SymbolicVar);
+
+#[cfg(feature = "symbolic")]
+impl fmt::Display for SymbolicVar {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}: SYM {:?} {:?}",
+            self.as_event_label(),
+            self.id(),
+            self.sort()
+        )
+    }
+}
+
+#[cfg(feature = "symbolic")]
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct ConstraintEval {
+    label: EventLabel,
+    expr: SymExpr,
+    branch_taken: bool,
+}
+
+#[cfg(feature = "symbolic")]
+impl ConstraintEval {
+    pub(crate) fn new(pos: Event, expr: SymExpr, branch_taken: bool) -> Self {
+        Self {
+            label: EventLabel::new(pos),
+            expr,
+            branch_taken,
+        }
+    }
+
+    pub(crate) fn expr(&self) -> &SymExpr {
+        &self.expr
+    }
+
+    pub(crate) fn branch_taken(&self) -> bool {
+        self.branch_taken
+    }
+
+    pub(crate) fn set_branch_taken(&mut self, b: bool) {
+        self.branch_taken = b;
+    }
+}
+
+#[cfg(feature = "symbolic")]
+as_label!(ConstraintEval);
+
+#[cfg(feature = "symbolic")]
+impl fmt::Display for ConstraintEval {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}: C {:?} [{}]",
+            self.as_event_label(),
+            self.expr(),
+            if self.branch_taken() { "true" } else { "false" }
+        )
     }
 }

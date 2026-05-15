@@ -444,8 +444,6 @@ impl ExecutionGraph {
         }
         ret
     }
-	 
-	
 
     /// Add a label to the graph, giving it a new stamp if it does not have one.
     pub(crate) fn add_label(&mut self, lab: LabelEnum) -> Event {
