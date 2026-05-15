@@ -74,7 +74,7 @@ impl<T: Clone + Debug + PartialEq + std::marker::Send + 'static> AtomicRegister<
         let mut tsync = Synchronizer::<T> { value };
 
         let tsync_handle = thread::Builder::new()
-            .name("AtomicRegister synchronizer".to_string())
+            .name("traceforge_runtime::atomic_register".to_string())
             .spawn_daemon(move || {
                 tsync.execute();
             })

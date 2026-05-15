@@ -13,6 +13,7 @@ use crate::thread::{construct_thread_id, main_thread_id};
 use crate::vector_clock::VectorClock;
 use crate::{event_label::*, Val};
 use crate::{replay as REPLAY, ThreadId};
+use log::debug;
 
 /// Encapsulates the execution information about a single thread
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -40,6 +41,9 @@ pub(crate) struct ExecutionGraph {
     #[serde(skip)]
     recvs: HashMap<Loc, Vec<Event>>,
     dropped_sends: usize,
+    /// Debug: set of all events at the start of execution, events removed as they are replayed.
+    #[serde(skip)]
+    pub(crate) unreplayed_events: HashSet<Event>,
 }
 
 impl ExecutionGraph {
@@ -50,7 +54,7 @@ impl ExecutionGraph {
             threads: IndexedMap::new_with_first(ThreadInfo {
                 tid: t0,
                 task_id: Some(TaskId(0)),
-                tclab: TCreate::new(event, t0, Some("main".to_owned()), false, None, vec![]),
+                tclab: TCreate::new(event, t0, Some("main".to_owned()), false, None, vec![], vec![]),
                 labels: vec![LabelEnum::Begin(Begin::main())],
             }),
             stamp: 0,
@@ -59,6 +63,7 @@ impl ExecutionGraph {
             sends: HashMap::new(),
             recvs: HashMap::new(),
             dropped_sends: 0,
+            unreplayed_events: HashSet::new(),
         }
     }
 
@@ -74,6 +79,13 @@ impl ExecutionGraph {
 
         // Reset all the other task ids to None
         for t in &mut self.threads.iter_mut().skip(1) {
+            // if let Some(id) = t.task_id {
+            //     self.task_id_map.remove(&id);
+            // }
+            // else {
+            //     debug!("[DEBUG cut_to_view] thread {} has task_id={:?} and num_labels={}", t.tid, t.task_id, t.labels.len());
+            // }
+            debug!("[DEBUG initialize] thread {} has task_id={:?} and num_labels={}", t.tid, t.task_id, t.labels.len());
             self.task_id_map.remove(&t.task_id.unwrap());
             t.task_id = None;
         }
@@ -98,6 +110,24 @@ impl ExecutionGraph {
                 if let LabelEnum::SendMsg(s) = e {
                     s.val.set_pending();
                 }
+            }
+        }
+
+        // Debug: populate unreplayed_events with all events in the graph,
+        // skipping first events of threads (index 0) and blocked receives/joins.
+        self.unreplayed_events.clear();
+        for thr in self.threads.iter() {
+            for (i, lab) in thr.labels.iter().enumerate() {
+                if i == 0 {
+                    continue;
+                }
+                if let LabelEnum::Block(b) = lab {
+                    match b.btype() {
+                        BlockType::Value(..) | BlockType::Join(_) => continue,
+                        _ => {}
+                    }
+                }
+                self.unreplayed_events.insert(Event::new(thr.tid, i as u32));
             }
         }
     }
@@ -319,7 +349,6 @@ impl ExecutionGraph {
             }
         }
 
-        // Return a new thread that is one larger than existing.
         let opaque_id = self
             .threads
             .iter()
@@ -711,8 +740,10 @@ impl ExecutionGraph {
         }
     }
 
-    // Removes recv from the send's readers
-    fn remove_from_readers(&mut self, recv: Event) {
+    // Removes recv from the send's readers.
+    // If deleted_receives is provided and the send has cancelled_recv_readers,
+    // fall back to the last one not in the deleted set instead of setting to None.
+    fn remove_from_readers(&mut self, recv: Event, deleted_receives: &[Event]) {
         let rlab = self.recv_label(recv).unwrap();
         if let Some(old_send) = rlab.rf() {
             let monitors = rlab.monitors(self.send_label(old_send).unwrap());
@@ -721,7 +752,8 @@ impl ExecutionGraph {
                 old_send.remove_monitor_reader(recv)
             }
             if old_send.reader().is_some_and(|r| r == recv) {
-                old_send.set_reader(None);
+                let fallback = old_send.last_cancelled_recv_reader_not_in(deleted_receives);
+                old_send.set_reader(fallback);
             }
         }
     }
@@ -738,12 +770,35 @@ impl ExecutionGraph {
         }
     }
 
+    /// For all sends whose reader is `recv`, pop the last cancelled_recv_reader
+    /// and set it as the new reader (or None if empty).
+    pub(crate) fn pop_fallback_readers(&mut self, recv: Event) {
+        let send_positions: Vec<Event> = self.threads.iter()
+            .flat_map(|t| t.labels.iter())
+            .filter_map(|lab| {
+                if let LabelEnum::SendMsg(slab) = lab {
+                    if slab.reader().is_some_and(|r| r == recv) {
+                        return Some(slab.pos());
+                    }
+                }
+                None
+            })
+            .collect();
+
+        for spos in send_positions {
+            let slab = self.send_label(spos).unwrap();
+            let fallback = slab.pop_cancelled_recv_reader();
+            self.send_label_mut(spos).unwrap().set_reader(fallback);
+        }
+    }
+
     /// Change rf in-place, updating the senders' readers
     pub(crate) fn change_rf(&mut self, recv: Event, send: Option<Event>) {
         assert!(self.is_recv(recv));
         assert!(send.is_none() || self.is_send(send.unwrap()));
 
-        self.remove_from_readers(recv);
+        self.remove_from_readers(recv, &[]);
+        self.pop_fallback_readers(recv);
 
         // Set recv as a reader of the new send
         if let Some(new_send) = send {
@@ -938,6 +993,8 @@ impl ExecutionGraph {
     }
 
     fn cut_to_view(&mut self, v: &VectorClock) {
+        // println!("Enter cut to view");
+
         let mut deleted: HashSet<Event> = HashSet::new();
         // Flag for fast-path: none has been dropped, nothing to keep track
         let some_dropped = self.dropped_sends() != 0;
@@ -968,6 +1025,8 @@ impl ExecutionGraph {
             self.decr_dropped_sends(deleted_dropped);
         }
 
+        // println!("After sends cut to view");
+
         // Recv cache: remove the receives which are not visible in the vector clock
         self.recvs
             .values_mut()
@@ -987,12 +1046,32 @@ impl ExecutionGraph {
             }
         }
 
-        for deleted in deleted_receives {
-            self.remove_from_readers(deleted);
+        // For each send, remove deleted receives from its cancelled_recv_readers list.
+        // If any cancelled readers remain, promote the earliest one to be the send's
+        // reader and clear the list, so that replay wakes up the correct receive.
+        // Sends with no cancelled readers keep their current reader; it will be set
+        // to None by remove_from_readers below if that reader was deleted.
+
+        for thread in self.threads.iter_mut() {
+            for lab in thread.labels.iter_mut() {
+                if let LabelEnum::SendMsg(slab) = lab {
+                    slab.remove_from_cancelled_recv_readers(&deleted_receives);
+                    if let Some(first) = slab.first_cancelled_recv_reader() {
+                        slab.set_reader(Some(first));
+                        slab.clear_cancelled_recv_readers();
+                    }
+                }
+            }
         }
         for deleted in deleted_receives_inbox {
             self.remove_from_readers_inbox(deleted);
         }
+
+        for i in 0..deleted_receives.len() {
+            self.remove_from_readers(deleted_receives[i], &deleted_receives);
+        }
+
+        // println!("After recv cut to view");
 
         // Erase all the threads not found in the vector clock.
         let threads = &mut self.threads;
@@ -1001,6 +1080,13 @@ impl ExecutionGraph {
             if v.get(t.tid).is_some() {
                 true
             } else {
+                // if let Some(id) = t.task_id {
+                //     tasks.remove(&id);
+                // }
+                // else {
+                //     debug!("[cut_to_view] removing thread {} task_id={:?} num_labels={}", t.tid, t.task_id, t.labels.len());
+                // }
+                debug!("[cut_to_view] removing thread {} task_id={:?} num_labels={}", t.tid, t.task_id, t.labels.len());
                 tasks.remove(&t.task_id.unwrap());
                 false
             }
@@ -1250,6 +1336,354 @@ impl<'a> RecvLike<'a> {
             RecvLike::RecvMsg(r) => r.pos(),
             RecvLike::Inbox(i) => i.pos(),
         }
+    }
+}
+
+/// Wrapper for pretty-printing an ExecutionGraph with simplified mutex and async operations.
+pub(crate) struct PrettyExecutionGraph<'a>(pub(crate) &'a ExecutionGraph);
+
+impl<'a> std::fmt::Display for PrettyExecutionGraph<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.pretty_fmt(f)
+    }
+}
+
+impl ExecutionGraph {
+    pub(crate) fn pretty_display(&self) -> PrettyExecutionGraph<'_> {
+        PrettyExecutionGraph(self)
+    }
+
+    pub(crate) fn pretty_fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Identify special threads
+        let mut mutex_tids: HashSet<ThreadId> = HashSet::new();
+        let mut async_recv_tids: HashSet<ThreadId> = HashSet::new();
+
+        for thread_info in self.threads.iter() {
+            if let Some(name) = thread_info.tclab.name() {
+                if name.starts_with("Mutex synchronizer") {
+                    mutex_tids.insert(thread_info.tid);
+                } else if name.starts_with("traceforge_runtime::async_recv-") {
+                    async_recv_tids.insert(thread_info.tid);
+                }
+            }
+        }
+
+        // Rule 4 pre-scan: find async_recv threads created but NOT joined.
+        // For each, identify the two UNIQUE events preceding the TCREATE
+        // that define the channel endpoints, so we can hide related sends/receives.
+        let mut joined_async: HashSet<ThreadId> = HashSet::new();
+        for thread_info in self.threads.iter() {
+            for lab in thread_info.labels.iter() {
+                if let LabelEnum::TJoin(tjoin) = lab {
+                    if async_recv_tids.contains(&tjoin.cid()) {
+                        joined_async.insert(tjoin.cid());
+                    }
+                }
+            }
+        }
+
+        // For non-joined async_recv threads: collect channel Locs and UNIQUE events to skip
+        let mut skip_send_locs: HashSet<Loc> = HashSet::new();
+        let mut skip_recv_locs: HashSet<Loc> = HashSet::new();
+        let mut skip_unique_events: HashSet<Event> = HashSet::new();
+        for thread_info in self.threads.iter() {
+            for (i, lab) in thread_info.labels.iter().enumerate() {
+                if let LabelEnum::TCreate(tc) = lab {
+                    let async_tid = tc.cid();
+                    if async_recv_tids.contains(&async_tid)
+                        && i >= 2
+                    {
+                        if let (LabelEnum::Unique(u1), LabelEnum::Unique(u2)) =
+                            (&thread_info.labels[i - 2], &thread_info.labels[i - 1])
+                        {
+                            skip_recv_locs.insert(u1.get_loc());
+                            skip_send_locs.insert(u2.get_loc());
+                            skip_unique_events.insert(u1.as_event_label().pos());
+                            skip_unique_events.insert(u2.as_event_label().pos());
+                        }
+                    }
+                }
+            }
+        }
+
+        writeln!(f, "Printing exec graph (pretty)")?;
+
+        for thread_info in self.threads.iter() {
+            // Skip mutex synchronizer and async_recv threads
+            if mutex_tids.contains(&thread_info.tid)
+                || async_recv_tids.contains(&thread_info.tid)
+            {
+                continue;
+            }
+
+            // Pre-scan: collect which mutex threads this thread uses (Lock/Unlock/TryLock)
+            let mut used_locks: BTreeSet<ThreadId> = BTreeSet::new();
+            for lab in thread_info.labels.iter() {
+                if let LabelEnum::SendMsg(send) = lab {
+                    if !send.val().is_pending()
+                        && send.val().type_name == "traceforge::sync::mutex::LockRequest"
+                    {
+                        if let Some(loc) = send.send_loc().loc_opt() {
+                            for &mtid in &mutex_tids {
+                                if *loc == Loc::new(Thread(mtid)) {
+                                    used_locks.insert(mtid);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Print thread header
+            let tid = thread_info.tid;
+            let daemon = (if thread_info.tclab.daemon() {
+                ", daemon"
+            } else {
+                ""
+            })
+            .to_owned();
+            let locks_suffix = if used_locks.is_empty() {
+                String::new()
+            } else {
+                let lock_list: Vec<String> = used_locks.iter().map(|m| format!("{}", m)).collect();
+                format!(" uses locks {}", lock_list.join(", "))
+            };
+            match thread_info.tclab.name() {
+                None => writeln!(f, "thread {}{}:{}", tid, daemon, locks_suffix)?,
+                Some(name) => writeln!(f, "thread \"{}\"[tid={}{}]:{}", name, tid, daemon, locks_suffix)?,
+            }
+
+            // Track which async_recv threads this thread created
+            let local_async_creates: HashSet<ThreadId> = thread_info
+                .labels
+                .iter()
+                .filter_map(|l| {
+                    if let LabelEnum::TCreate(tc) = l {
+                        if async_recv_tids.contains(&tc.cid()) {
+                            return Some(tc.cid());
+                        }
+                    }
+                    None
+                })
+                .collect();
+
+            let mut skip_next = false;
+            for (i, lab) in thread_info.labels.iter().enumerate() {
+                if skip_next {
+                    skip_next = false;
+                    continue;
+                }
+
+                match lab {
+                    // Skip TCREATE for async_recv threads (keep mutex ones visible)
+                    LabelEnum::TCreate(tc) => {
+                        if async_recv_tids.contains(&tc.cid()) {
+                            continue;
+                        }
+                        writeln!(f, "\t{}", lab)?;
+                    }
+
+                    // Rule 1: Mutex Lock/Unlock simplification
+                    LabelEnum::SendMsg(send) => {
+                        // Rule 4: skip sends on channels of non-joined async_recv threads
+                        if let Some(loc) = send.send_loc().loc_opt() {
+                            if skip_send_locs.contains(loc) {
+                                continue;
+                            }
+                        }
+
+                        if !send.val().is_pending()
+                            && send.val().type_name
+                                == "traceforge::sync::mutex::LockRequest"
+                        {
+                            let val_debug = format!("{:?}", send.val().val);
+
+                            // Find which mutex thread this SEND targets
+                            let target_mutex =
+                                send.send_loc().loc_opt().and_then(|send_loc| {
+                                    mutex_tids
+                                        .iter()
+                                        .find(|&&mtid| *send_loc == Loc::new(Thread(mtid)))
+                                        .copied()
+                                });
+
+                            if let Some(mtid) = target_mutex {
+                                if val_debug.starts_with("Lock(")
+                                    || val_debug.starts_with("TryLock(")
+                                {
+                                    // Check if next event is RECV from the mutex thread
+                                    if let Some(LabelEnum::RecvMsg(recv)) =
+                                        thread_info.labels.get(i + 1)
+                                    {
+                                        if let Some(rf) = recv.rf() {
+                                            if rf.thread == mtid {
+                                                let op = if val_debug.starts_with("Lock(")
+                                                {
+                                                    "Lock"
+                                                } else {
+                                                    "TryLock"
+                                                };
+                                                writeln!(
+                                                    f,
+                                                    "\t{}: {}({})",
+                                                    recv.as_event_label(),
+                                                    op,
+                                                    mtid
+                                                )?;
+                                                skip_next = true;
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                } else if val_debug.starts_with("Unlock(") {
+                                    writeln!(
+                                        f,
+                                        "\t{}: Unlock({})",
+                                        send.as_event_label(),
+                                        mtid
+                                    )?;
+                                    continue;
+                                }
+                            }
+                        }
+                        writeln!(f, "\t{}", lab)?;
+                    }
+
+                    // Rule 2: Simplify RECV whose matching send comes from a
+                    // thread that is NOT an <async_recv-...> thread.
+                    LabelEnum::RecvMsg(recv) => {
+                        // Rule 4: skip receives on channels of non-joined async_recv threads
+                        if let Some(rf) = recv.rf() {
+                            if let Some(send) = self.send_label(rf) {
+                                if let Some(loc) = send.send_loc().loc_opt() {
+                                    if skip_recv_locs.contains(loc) {
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Some(rf) = recv.rf() {
+                            if !async_recv_tids.contains(&rf.thread) {
+                                if let Some(send) = self.send_label(rf) {
+                                    let val_debug =
+                                        format!("{:?}", send.val().val);
+                                    writeln!(
+                                        f,
+                                        "\t{}: RECV {} <{}>",
+                                        recv.as_event_label(),
+                                        val_debug,
+                                        send.val().type_name
+                                    )?;
+                                    continue;
+                                }
+                            }
+                        }
+                        writeln!(f, "\t{}", lab)?;
+                    }
+
+                    // Rule 3: TJOIN of async_recv thread (created by this thread)
+                    LabelEnum::TJoin(tjoin) => {
+                        if async_recv_tids.contains(&tjoin.cid())
+                            && local_async_creates.contains(&tjoin.cid())
+                        {
+                            let async_thr = self.get_thr(&tjoin.cid());
+                            let mut found = false;
+                            for alab in async_thr.labels.iter() {
+                                if let LabelEnum::RecvMsg(arecv) = alab {
+                                    if let Some(arf) = arecv.rf() {
+                                        if arf.thread != thread_info.tid {
+                                            if let Some(send) = self.send_label(arf)
+                                            {
+                                                if !send.val().is_pending() {
+                                                    let val_debug = format!(
+                                                        "{:?}",
+                                                        send.val().val
+                                                    );
+                                                    writeln!(
+                                                        f,
+                                                        "\t{}: RECV {} <{}>",
+                                                        tjoin.as_event_label(),
+                                                        val_debug,
+                                                        send.val().type_name
+                                                    )?;
+                                                    found = true;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if found {
+                                continue;
+                            }
+                        }
+                        writeln!(f, "\t{}", lab)?;
+                    }
+
+                    // Rule 4: skip UNIQUE events that create channels for non-joined async_recv threads
+                    LabelEnum::Unique(u) => {
+                        if skip_unique_events.contains(&u.as_event_label().pos()) {
+                            continue;
+                        }
+                        writeln!(f, "\t{}", lab)?;
+                    }
+
+                    _ => writeln!(f, "\t{}", lab)?,
+                }
+            }
+        }
+
+        // Print lock summary: for each mutex, list the threads that use it
+        if !mutex_tids.is_empty() {
+            // Collect lock→users mapping across all non-skipped threads
+            let mut lock_users: BTreeMap<ThreadId, BTreeSet<(ThreadId, Option<String>)>> =
+                BTreeMap::new();
+            for thread_info in self.threads.iter() {
+                if mutex_tids.contains(&thread_info.tid)
+                    || async_recv_tids.contains(&thread_info.tid)
+                {
+                    continue;
+                }
+                for lab in thread_info.labels.iter() {
+                    if let LabelEnum::SendMsg(send) = lab {
+                        if !send.val().is_pending()
+                            && send.val().type_name
+                                == "traceforge::sync::mutex::LockRequest"
+                        {
+                            if let Some(loc) = send.send_loc().loc_opt() {
+                                for &mtid in &mutex_tids {
+                                    if *loc == Loc::new(Thread(mtid)) {
+                                        lock_users
+                                            .entry(mtid)
+                                            .or_default()
+                                            .insert((
+                                                thread_info.tid,
+                                                thread_info.tclab.name().clone(),
+                                            ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            writeln!(f, "\nLock summary:")?;
+            for (mtid, users) in &lock_users {
+                let user_list: Vec<String> = users
+                    .iter()
+                    .map(|(tid, name)| match name {
+                        Some(n) => format!("\"{}\"[{}]", n, tid),
+                        None => format!("{}", tid),
+                    })
+                    .collect();
+                writeln!(f, "  {}: used by {}", mtid, user_list.join(", "))?;
+            }
+        }
+
+        Ok(())
     }
 }
 
