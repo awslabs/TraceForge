@@ -29,6 +29,7 @@ pub(crate) enum LabelEnum {
     Choice(Choice),
     Sample(Sample),
     Block(Block),
+    Inbox(Inbox),
 
     #[cfg(feature = "symbolic")]
     SymbolicVar(SymbolicVar),
@@ -50,6 +51,7 @@ macro_rules! match_and_run {
             LabelEnum::Choice(l) => l.as_event_label().$name($($arg),*),
             LabelEnum::Sample(l) => l.as_event_label().$name($($arg),*),
             LabelEnum::Block(l) => l.as_event_label().$name($($arg),*),
+            LabelEnum::Inbox(l) => l.as_event_label().$name($($arg),*),
 
             #[cfg(feature = "symbolic")]
             LabelEnum::SymbolicVar(l) => l.as_event_label().$name($($arg),*),
@@ -73,6 +75,7 @@ macro_rules! match_and_run_mut {
             LabelEnum::Choice(l) => l.as_event_label_mut().$name($($arg),*),
             LabelEnum::Sample(l) => l.as_event_label_mut().$name($($arg),*),
             LabelEnum::Block(l) => l.as_event_label_mut().$name($($arg),*),
+            LabelEnum::Inbox(l) => l.as_event_label_mut().$name($($arg),*),
 
             #[cfg(feature = "symbolic")]
             LabelEnum::SymbolicVar(l) => l.as_event_label_mut().$name($($arg),*),
@@ -260,6 +263,25 @@ impl LabelEnum {
                     return Ok(());
                 }
             }
+            LabelEnum::Inbox(s) => {
+                if let LabelEnum::Inbox(o) = other {
+                    if s.senders() != o.senders() {
+                        return Err(format!(
+                            "Expected inbox to accept from {:?} but got {:?}",
+                            s.senders(),
+                            o.senders()
+                        ));
+                    }
+                    if s.rfs() != o.rfs() {
+                        return Err(format!(
+                            "Expected inbox to read from {:?} but read from {:?}",
+                            s.rfs(),
+                            o.rfs()
+                        ));
+                    }
+                    return Ok(());
+                }
+            }
             #[cfg(feature = "symbolic")]
             LabelEnum::SymbolicVar(s) => {
                 if let LabelEnum::SymbolicVar(o) = other {
@@ -301,7 +323,7 @@ impl LabelEnum {
             // and thus we will never reach this path.
             // If ever needed, return true since we can compare neither locations
             // (they are lost during deserialization) nor tags (they are predicates)
-            (BlockType::Value(_), BlockType::Value(_)) => unreachable!(),
+            (BlockType::Value(_, _), BlockType::Value(_, _)) => unreachable!(),
             _ => false,
         }
     }
@@ -325,7 +347,7 @@ impl LabelEnum {
             LabelEnum::Choice(s) => format!("called Range({:?})::nondet", s.range()),
             LabelEnum::Sample(_) => "called sample()".to_string(),
             LabelEnum::Block(_) => "became blocked".to_string(),
-
+            LabelEnum::Inbox(_) => "requested an inbox collection".to_string(),
             #[cfg(feature = "symbolic")]
             LabelEnum::SymbolicVar(_) => "declared a symbolic variable".to_string(),
             #[cfg(feature = "symbolic")]
@@ -348,7 +370,7 @@ impl fmt::Display for LabelEnum {
             LabelEnum::Choice(lab) => write!(f, "{}", lab),
             LabelEnum::Sample(lab) => write!(f, "{}", lab),
             LabelEnum::Block(lab) => write!(f, "{}", lab),
-
+            LabelEnum::Inbox(lab) => write!(f, "{}", lab),
             #[cfg(feature = "symbolic")]
             LabelEnum::SymbolicVar(lab) => write!(f, "{}", lab),
             #[cfg(feature = "symbolic")]
@@ -371,7 +393,7 @@ impl fmt::Debug for LabelEnum {
             LabelEnum::Choice(lab) => write!(f, "{}", lab),
             LabelEnum::Sample(lab) => write!(f, "{}", lab),
             LabelEnum::Block(lab) => write!(f, "{}", lab),
-
+            LabelEnum::Inbox(lab) => write!(f, "{}", lab),
             #[cfg(feature = "symbolic")]
             LabelEnum::SymbolicVar(lab) => write!(f, "{}", lab),
             #[cfg(feature = "symbolic")]
@@ -1232,7 +1254,7 @@ pub(crate) enum BlockType {
     Assume,
     Assert,
     // Internal blocking
-    Value(RecvLoc),
+    Value(RecvLoc, usize),
     Join(ThreadId),
 }
 
@@ -1273,6 +1295,146 @@ as_label!(Block);
 impl fmt::Display for Block {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: BLK {:?}", self.as_event_label(), self.btype())
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct Inbox {
+    label: EventLabel,
+    loc: RecvLoc,
+    comm: CommunicationModel,
+    // None denotes the empty inbox subset.
+    rfs: Option<Vec<Event>>,
+    min: usize,
+    max: Option<usize>,
+    revisitable: bool,
+}
+
+impl Inbox {
+    pub(crate) fn new(
+        pos: Event,
+        loc: RecvLoc,
+        comm: CommunicationModel,
+        rfs: Option<Vec<Event>>,
+        min: usize,
+        max: Option<usize>,
+    ) -> Self {
+        Self {
+            label: EventLabel::new(pos),
+            loc,
+            comm,
+            rfs,
+            min,
+            max,
+            revisitable: true,
+        }
+    }
+
+    pub(crate) fn rfs(&self) -> Option<Vec<Event>> {
+        self.rfs.clone()
+    }
+
+    pub(crate) fn set_rf(&mut self, rfs: Option<Vec<Event>>) {
+        self.rfs = rfs
+    }
+
+    pub(crate) fn is_non_blocking(&self) -> bool {
+        self.min == 0
+    }
+
+    pub(crate) fn min(&self) -> usize {
+        self.min
+    }
+
+    pub(crate) fn max(&self) -> Option<usize> {
+        self.max
+    }
+
+    pub(crate) fn has_capacity_for(&self, count: usize) -> bool {
+        // Upper-bound check used during subset generation/revisit filtering.
+        self.max.map(|m| count <= m).unwrap_or(true)
+    }
+
+    pub(crate) fn is_revisitable(&self) -> bool {
+        self.revisitable
+    }
+
+    pub(crate) fn set_revisitable(&mut self, status: bool) {
+        self.revisitable = status
+    }
+
+    pub(crate) fn recover_lost(&mut self, other: Self) {
+        self.loc = other.loc;
+        self.min = other.min;
+        self.max = other.max;
+        self.comm = other.comm;
+    }
+
+    pub(crate) fn recv_loc(&self) -> &RecvLoc {
+        &self.loc
+    }
+
+    pub(crate) fn comm(&self) -> CommunicationModel {
+        self.comm
+    }
+
+    pub(crate) fn receiver(&self) -> ThreadId {
+        self.label.pos.thread
+    }
+
+    pub(crate) fn senders(&self) -> Option<Vec<ThreadId>> {
+        match self.rfs() {
+            Some(rfs) => {
+                let mut tids = Vec::with_capacity(rfs.len());
+                for rf in rfs {
+                    tids.push(rf.thread);
+                }
+                Some(tids)
+            }
+            None => None,
+        }
+    }
+
+    pub(crate) fn matches(&self, send: &SendMsg) -> bool {
+        self.recv_loc().matches(send)
+    }
+
+    pub(crate) fn cached_porf(&self) -> &VectorClock {
+        &self.as_event_label().cached_porf
+    }
+}
+
+as_label!(Inbox);
+
+impl fmt::Display for Inbox {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let max = self
+            .max
+            .map(|m| m.to_string())
+            .unwrap_or_else(|| "inf".to_string());
+        write!(
+            f,
+            "{}: INBOX({}, {}) [{}]",
+            self.label,
+            self.min,
+            max,
+            match self.rfs() {
+                None => "{}".to_string(),
+                Some(rfs) if rfs.is_empty() => "{}".to_string(),
+                Some(rfs) => {
+                    let mut r = String::new();
+                    r.push_str("{");
+                    for (idx, rf) in rfs.iter().enumerate() {
+                        if idx > 0 {
+                            r.push_str(", ");
+                        }
+                        r.push_str(format!("{}", rf).as_str())
+                    }
+                    r.push_str("}");
+                    r
+                }
+            }
+        )
     }
 }
 

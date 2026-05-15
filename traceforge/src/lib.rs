@@ -1250,6 +1250,97 @@ fn recv_val_block_with_tag<'a>(
     }
 }
 
+/// Returns an order-insensitive collection of messages from the thread queue or times out (empty set)
+pub fn inbox() -> Vec<Option<Val>> {
+    inbox_with_bounds(0, None)
+}
+
+/// Returns an order-insensitive collection of messages from the queue that matches `tag`
+pub fn inbox_with_tag<F>(f: F) -> Vec<Option<Val>>
+where
+    F: Fn(ThreadId, Option<u32>) -> bool + 'static + Send + Sync,
+{
+    inbox_with_tag_and_bounds(f, 0, None)
+}
+
+/// Returns an order-insensitive collection of messages from the queue that matches vector `tag`
+pub fn inbox_with_vec_tag<F>(f: F) -> Vec<Option<Val>>
+where
+    F: Fn(ThreadId, Option<Vec<u32>>) -> bool + 'static + Send + Sync,
+{
+    inbox_internal(Some(PredicateType(Arc::new(f))), 0, None)
+}
+
+/// Returns an order-insensitive collection of messages from the queue of at least `min` messages
+/// and at most `max` if `max` != None
+pub fn inbox_with_bounds(min: usize, max: Option<usize>) -> Vec<Option<Val>> {
+    inbox_internal(None, min, max)
+}
+
+/// Returns an order-insensitive collection of messages that matches `tag` from the queue of at
+/// least `min` messages and at most `max` if `max` != None
+pub fn inbox_with_tag_and_bounds<F>(f: F, min: usize, max: Option<usize>) -> Vec<Option<Val>>
+where
+    F: Fn(ThreadId, Option<u32>) -> bool + 'static + Send + Sync,
+{
+    inbox_internal(
+        Some(PredicateType(Arc::new(move |tid, tag| {
+            let tag = tag.and_then(|tags| tags.first().copied());
+            f(tid, tag)
+        }))),
+        min,
+        max,
+    )
+}
+
+/// Returns an order-insensitive collection of messages that matches vector `tag` from the queue of
+/// at least `min` messages and at most `max` if `max` != None
+pub fn inbox_with_vec_tag_and_bounds<F>(f: F, min: usize, max: Option<usize>) -> Vec<Option<Val>>
+where
+    F: Fn(ThreadId, Option<Vec<u32>>) -> bool + 'static + Send + Sync,
+{
+    inbox_internal(Some(PredicateType(Arc::new(f))), min, max)
+}
+
+fn inbox_internal(tag: Option<PredicateType>, min: usize, max: Option<usize>) -> Vec<Option<Val>> {
+    let (loc, comm) = self_loc_comm();
+    let locs = iter::once(&loc).collect::<Vec<_>>();
+    validate_locs(&locs);
+
+    loop {
+        switch();
+        let locs = locs.clone();
+        let tag = tag.clone();
+        let (vals, blocked, _pos) = ExecutionState::with(|s| {
+            let pos = s.next_pos();
+            let (vals, _inds, blocked) = s.must.borrow_mut().handle_inbox(Inbox::new(
+                pos,
+                RecvLoc::new(locs, tag),
+                comm,
+                None,
+                min,
+                max,
+            ));
+            (vals, blocked, pos)
+        });
+
+        if blocked {
+            ExecutionState::with(|s| s.prev_pos());
+            continue;
+        }
+
+        let stuck = vals.iter().flatten().any(Val::is_pending);
+        if stuck {
+            ExecutionState::with(|s| {
+                s.current_mut().stuck();
+                s.prev_pos();
+            });
+        } else {
+            return vals;
+        }
+    }
+}
+
 /// Models a nondeterministic choice in the model
 /// #[deprecated(since="0.2", note="please use `<bool>::nondet()` instead")]
 pub fn nondet() -> bool {
