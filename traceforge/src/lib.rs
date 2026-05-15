@@ -29,6 +29,8 @@ mod testmode;
 use future::spawn_receive;
 pub use testmode::{parallel_test, test};
 
+#[cfg(feature = "symbolic")]
+pub mod symbolic;
 pub mod thread;
 mod vector_clock;
 
@@ -245,6 +247,9 @@ pub struct Config {
     pub(crate) pretty_graph_printing: bool,
     #[serde(skip)]
     pub(crate) callbacks: Arc<Mutex<Vec<Box<dyn ExecutionObserver + Send>>>>,
+
+    #[cfg(feature = "symbolic")]
+    pub(crate) symbolic: bool,
 }
 
 impl Config {
@@ -314,6 +319,8 @@ impl ConfigBuilder {
             predetermined_global_choices: HashMap::new(),
             pretty_graph_printing: false,
             callbacks: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(feature = "symbolic")]
+            symbolic: false,
         })
     }
 
@@ -322,6 +329,10 @@ impl ConfigBuilder {
     fn check_valid(self) -> Self {
         if self.0.symmetry {
             panic!("Symmetry reduction is currently not supported")
+        }
+        #[cfg(feature = "symbolic")]
+        if self.0.symbolic && self.0.parallel {
+            panic!("Symbolic/Condpor is not supported with parallel exploration yet");
         }
         if self.0.symmetry && self.0.schedule_policy == SchedulePolicy::Arbitrary {
             eprintln!("Symmetry reduction can only be used with LTR!");
@@ -583,6 +594,13 @@ impl ConfigBuilder {
     /// ```
     pub fn with_predetermined_choices(mut self, choices: HashMap<String, Vec<Vec<bool>>>) -> Self {
         self.0.predetermined_choices = choices;
+        self
+    }
+
+    /// Enables the symbolic (concolic) support (as in `condpor`).
+    #[cfg(feature = "symbolic")]
+    pub fn with_symbolic(mut self, enabled: bool) -> Self {
+        self.0.symbolic = enabled;
         self
     }
 
