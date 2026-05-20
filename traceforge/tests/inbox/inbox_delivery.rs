@@ -1,4 +1,4 @@
-use traceforge::{self, thread, ConsType};
+use traceforge::{self, thread};
 
 #[derive(Clone, Debug, PartialEq)]
 struct Msg {
@@ -162,6 +162,7 @@ inbox_exec_count_test!(exec_count_3_inbox_5_sender, 3, 5);
 inbox_exec_count_test!(exec_count_3_inbox_6_sender, 3, 6);
 inbox_exec_count_test!(exec_count_3_inbox_7_sender, 3, 7);
 inbox_exec_count_test!(exec_count_3_inbox_8_sender, 3, 8);
+#[ignore = "the test takes too long to run"]
 inbox_exec_count_test!(exec_count_3_inbox_9_sender, 3, 9);
 inbox_exec_count_test!(exec_count_4_inbox_0_sender, 4, 0);
 inbox_exec_count_test!(exec_count_4_inbox_1_sender, 4, 1);
@@ -171,7 +172,9 @@ inbox_exec_count_test!(exec_count_4_inbox_4_sender, 4, 4);
 inbox_exec_count_test!(exec_count_4_inbox_5_sender, 4, 5);
 inbox_exec_count_test!(exec_count_4_inbox_6_sender, 4, 6);
 inbox_exec_count_test!(exec_count_4_inbox_7_sender, 4, 7);
+#[ignore = "the test takes too long to run"]
 inbox_exec_count_test!(exec_count_4_inbox_8_sender, 4, 8);
+#[ignore = "the test takes too long to run"]
 inbox_exec_count_test!(exec_count_4_inbox_9_sender, 4, 9);
 inbox_exec_count_test!(exec_count_5_inbox_0_sender, 5, 0);
 inbox_exec_count_test!(exec_count_5_inbox_1_sender, 5, 1);

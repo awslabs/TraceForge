@@ -4,120 +4,120 @@ use traceforge::{self, thread, Config, ConsType};
 struct Msg {}
 
 macro_rules! equiv_test {
-    ($I_case:ident, $R_case:ident) => {
-        let I_stats = traceforge::verify(Config::builder().build(), $I_case);
-        let R_stats = traceforge::verify(Config::builder().build(), $R_case);
-        assert_eq!(I_stats.execs, R_stats.execs);
-        assert_eq!(I_stats.block, R_stats.block);
+    ($i_case:ident, $r_case:ident) => {
+        let i_stats = traceforge::verify(Config::builder().build(), $i_case);
+        let r_stats = traceforge::verify(Config::builder().build(), $r_case);
+        assert_eq!(i_stats.execs, r_stats.execs);
+        assert_eq!(i_stats.block, r_stats.block);
     };
 }
 
 macro_rules! not_equiv_test {
-    ($I_case:ident, $R_case:ident) => {
-        let I_stats = traceforge::verify(Config::builder().build(), $I_case);
-        let R_stats = traceforge::verify(Config::builder().build(), $R_case);
-        assert!(I_stats.execs != R_stats.execs || I_stats.block != R_stats.block);
+    ($i_case:ident, $r_case:ident) => {
+        let i_stats = traceforge::verify(Config::builder().build(), $i_case);
+        let r_stats = traceforge::verify(Config::builder().build(), $r_case);
+        assert!(i_stats.execs != r_stats.execs || i_stats.block != r_stats.block);
     };
 }
 
 #[test]
-fn I_eq_Rnb() {
-    let I_case = move || {
+fn i_eq_rnb() {
+    let i_case = move || {
         let _ = traceforge::inbox();
     };
-    let R_case = move || {
+    let r_case = move || {
         let _: Option<Msg> = traceforge::recv_msg();
     };
-    equiv_test!(I_case, R_case);
+    equiv_test!(i_case, r_case);
 }
 
 #[test]
-fn I11_eq_Rb() {
-    let I_case = move || {
+fn i11_eq_rb() {
+    let i_case = move || {
         let _ = traceforge::inbox_with_bounds(1, Some(1));
     };
-    let R_case = move || {
+    let r_case = move || {
         let _: Msg = traceforge::recv_msg_block();
     };
-    equiv_test!(I_case, R_case);
+    equiv_test!(i_case, r_case);
 }
 
 #[test]
-fn I11_neq_Rnb() {
-    let I_case = move || {
+fn i11_neq_rnb() {
+    let i_case = move || {
         let _ = traceforge::inbox_with_bounds(1, Some(1));
     };
-    let R_case = move || {
+    let r_case = move || {
         let _: Option<Msg> = traceforge::recv_msg();
     };
-    not_equiv_test!(I_case, R_case);
+    not_equiv_test!(i_case, r_case);
 }
 
 #[test]
-fn I_neq_Rb() {
-    let I_case = move || {
+fn i_neq_rb() {
+    let i_case = move || {
         let _ = traceforge::inbox();
     };
-    let R_case = move || {
+    let r_case = move || {
         let _: Msg = traceforge::recv_msg_block();
     };
-    not_equiv_test!(I_case, R_case);
+    not_equiv_test!(i_case, r_case);
 }
 
 #[test]
-fn SI_eq_SRnb() {
-    let I_case = move || {
+fn si_eq_srnb() {
+    let i_case = move || {
         traceforge::send_msg(traceforge::thread::main_thread_id(), Msg {});
         let _ = traceforge::inbox();
     };
-    let R_case = move || {
+    let r_case = move || {
         traceforge::send_msg(traceforge::thread::main_thread_id(), Msg {});
         let _: Option<Msg> = traceforge::recv_msg();
     };
-    equiv_test!(I_case, R_case);
+    equiv_test!(i_case, r_case);
 }
 
 #[test]
-fn IS_eq_RnbS() {
-    let I_case = move || {
+fn is_eq_rnb_s() {
+    let i_case = move || {
         let _ = traceforge::inbox();
         traceforge::send_msg(traceforge::thread::main_thread_id(), Msg {});
     };
-    let R_case = move || {
+    let r_case = move || {
         let _: Option<Msg> = traceforge::recv_msg();
         traceforge::send_msg(traceforge::thread::main_thread_id(), Msg {});
     };
-    equiv_test!(I_case, R_case);
+    equiv_test!(i_case, r_case);
 }
 
 #[test]
-fn SI_neq_SRb() {
-    let I_case = move || {
+fn si_neq_srb() {
+    let i_case = move || {
         traceforge::send_msg(traceforge::thread::main_thread_id(), Msg {});
         let _ = traceforge::inbox();
     };
-    let R_case = move || {
+    let r_case = move || {
         traceforge::send_msg(traceforge::thread::main_thread_id(), Msg {});
         let _: Msg = traceforge::recv_msg_block();
     };
-    not_equiv_test!(I_case, R_case);
+    not_equiv_test!(i_case, r_case);
 }
 
 #[test]
-fn I11S_neq_RnbS() {
-    let I_case = move || {
+fn i11_s_neq_rnb_s() {
+    let i_case = move || {
         let _ = traceforge::inbox_with_bounds(1, Some(1));
         traceforge::send_msg(traceforge::thread::main_thread_id(), Msg {});
     };
-    let R_case = move || {
+    let r_case = move || {
         let _: Option<Msg> = traceforge::recv_msg();
         traceforge::send_msg(traceforge::thread::main_thread_id(), Msg {});
     };
-    not_equiv_test!(I_case, R_case);
+    not_equiv_test!(i_case, r_case);
 }
 
 #[test]
-fn test_I2S() {
+fn test_i2_s() {
     let stats = traceforge::verify(Config::builder().build(), move || {
         let _ = traceforge::inbox();
         traceforge::send_msg(traceforge::thread::main_thread_id(), Msg {});
@@ -128,7 +128,7 @@ fn test_I2S() {
 }
 
 #[test]
-fn test_SIS() {
+fn test_sis() {
     let stats = traceforge::verify(Config::builder().build(), move || {
         traceforge::send_msg(traceforge::thread::main_thread_id(), Msg {});
         let _ = traceforge::inbox();
@@ -139,7 +139,7 @@ fn test_SIS() {
 }
 
 #[test]
-fn test_2SI() {
+fn test_2_si() {
     let stats = traceforge::verify(
         Config::builder().with_cons_type(ConsType::Bag).build(),
         move || {
@@ -153,7 +153,7 @@ fn test_2SI() {
 }
 
 #[test]
-fn test_nSIjS() {
+fn test_n_sij_s() {
     for n in 0..4u32 {
         for j in 0..4u32 {
             let stats = traceforge::verify(
@@ -176,7 +176,7 @@ fn test_nSIjS() {
 }
 
 #[test]
-fn test_2SRnbI() {
+fn test_2_srnb_i() {
     let stats = traceforge::verify(
         Config::builder().with_cons_type(ConsType::Bag).build(),
         move || {
@@ -193,7 +193,7 @@ fn test_2SRnbI() {
 }
 
 #[test]
-fn test_nSRnbI() {
+fn test_n_srnb_i() {
     for n in 1..4u32 {
         let stats = traceforge::verify(
             Config::builder().with_cons_type(ConsType::Bag).build(),
@@ -212,7 +212,7 @@ fn test_nSRnbI() {
 }
 
 #[test]
-fn test_nSIRnb() {
+fn test_n_sirnb() {
     for n in 1..4u32 {
         let stats = traceforge::verify(
             Config::builder().with_cons_type(ConsType::Bag).build(),
@@ -231,7 +231,7 @@ fn test_nSIRnb() {
 }
 
 #[test]
-fn test_RnbInS() {
+fn test_rnb_in_s() {
     for n in 1..4u32 {
         let stats = traceforge::verify(
             Config::builder().with_cons_type(ConsType::Bag).build(),
@@ -250,7 +250,7 @@ fn test_RnbInS() {
 }
 
 #[test]
-fn test_IRnbnS() {
+fn test_irnbn_s() {
     for n in 1..4u32 {
         let stats = traceforge::verify(
             Config::builder().with_cons_type(ConsType::Bag).build(),
@@ -269,7 +269,7 @@ fn test_IRnbnS() {
 }
 
 #[test]
-fn test_2SRnbI2SIRn() {
+fn test_2_srnb_i2_sirn() {
     let stats = traceforge::verify(
         Config::builder().with_cons_type(ConsType::Bag).build(),
         move || {
@@ -296,7 +296,7 @@ fn test_2SRnbI2SIRn() {
 }
 
 #[test]
-fn test_2SRnbI1inf() {
+fn test_2_srnb_i1inf() {
     let stats = traceforge::verify(
         Config::builder().with_cons_type(ConsType::Bag).build(),
         move || {
@@ -313,7 +313,7 @@ fn test_2SRnbI1inf() {
 }
 
 #[test]
-fn test_2SRnbI2inf() {
+fn test_2_srnb_i2inf() {
     let stats = traceforge::verify(
         Config::builder().with_cons_type(ConsType::Bag).build(),
         move || {
@@ -330,7 +330,7 @@ fn test_2SRnbI2inf() {
 }
 
 #[test]
-fn test_2SRnbI1x1() {
+fn test_2_srnb_i1x1() {
     let stats = traceforge::verify(
         Config::builder().with_cons_type(ConsType::Bag).build(),
         move || {
@@ -347,7 +347,7 @@ fn test_2SRnbI1x1() {
 }
 
 #[test]
-fn test_2SRnbI1x2() {
+fn test_2_srnb_i1x2() {
     let stats = traceforge::verify(
         Config::builder().with_cons_type(ConsType::Bag).build(),
         move || {
@@ -364,7 +364,7 @@ fn test_2SRnbI1x2() {
 }
 
 #[test]
-fn test_2SRnbI2x2() {
+fn test_2_srnb_i2x2() {
     let stats = traceforge::verify(
         Config::builder().with_cons_type(ConsType::Bag).build(),
         move || {
@@ -381,7 +381,7 @@ fn test_2SRnbI2x2() {
 }
 
 #[test]
-fn test_S_I1_SS() {
+fn test_s_i1_ss() {
     let stats = traceforge::verify(
         Config::builder().with_cons_type(ConsType::Bag).build(),
         move || {
@@ -399,9 +399,9 @@ fn test_S_I1_SS() {
                 traceforge::send_msg(inbox_tid, Msg {});
             });
 
-            inbox_thread.join();
-            s2_thread.join();
-            s3_thread.join();
+            let _ = inbox_thread.join();
+            let _ = s2_thread.join();
+            let _ = s3_thread.join();
         },
     );
     assert_eq!(stats.execs, 7);
@@ -409,7 +409,7 @@ fn test_S_I1_SS() {
 }
 
 #[test]
-fn test_S_I11_S() {
+fn test_s_i11_s() {
     let stats = traceforge::verify(
         Config::builder().with_cons_type(ConsType::Bag).build(),
         move || {
@@ -432,7 +432,7 @@ fn test_S_I11_S() {
 }
 
 #[test]
-fn test_S_I22_SS() {
+fn test_s_i22_ss() {
     let stats = traceforge::verify(
         Config::builder().with_cons_type(ConsType::Bag).build(),
         move || {
@@ -459,7 +459,7 @@ fn test_S_I22_SS() {
 }
 
 #[test]
-fn test_S_I1x2_SS() {
+fn test_s_i1x2_ss() {
     let stats = traceforge::verify(
         Config::builder().with_cons_type(ConsType::Bag).build(),
         move || {
@@ -486,7 +486,7 @@ fn test_S_I1x2_SS() {
 }
 
 #[test]
-fn test_I0_SS() {
+fn test_i0_ss() {
     let stats = traceforge::verify(
         Config::builder().with_cons_type(ConsType::Bag).build(),
         move || {
@@ -512,7 +512,7 @@ fn test_I0_SS() {
 }
 
 #[test]
-fn test_SA_SB_Ia1_SA() {
+fn test_sa_sb_ia1_sa() {
     let stats = traceforge::verify(
         Config::builder().with_cons_type(ConsType::Bag).build(),
         move || {
@@ -543,7 +543,7 @@ fn test_SA_SB_Ia1_SA() {
 }
 
 #[test]
-fn test_S_2I11_S() {
+fn test_s_2_i11_s() {
     let stats = traceforge::verify(
         Config::builder().with_cons_type(ConsType::Bag).build(),
         move || {
