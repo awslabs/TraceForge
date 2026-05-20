@@ -49,8 +49,8 @@ impl RevisitEnum {
         self.get_revisit().pos
     }
 
-    pub(crate) fn rev(&self) -> RevisitPlacement {
-        self.get_revisit().rev.clone()
+    pub(crate) fn rev(&self) -> &RevisitPlacement {
+        &self.get_revisit().rev
     }
 }
 

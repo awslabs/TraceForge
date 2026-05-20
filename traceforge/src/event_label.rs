@@ -1350,11 +1350,6 @@ impl Inbox {
         self.max
     }
 
-    pub(crate) fn has_capacity_for(&self, count: usize) -> bool {
-        // Upper-bound check used during subset generation/revisit filtering.
-        self.max.map(|m| count <= m).unwrap_or(true)
-    }
-
     pub(crate) fn is_revisitable(&self) -> bool {
         self.revisitable
     }
@@ -1376,10 +1371,6 @@ impl Inbox {
 
     pub(crate) fn comm(&self) -> CommunicationModel {
         self.comm
-    }
-
-    pub(crate) fn receiver(&self) -> ThreadId {
-        self.label.pos.thread
     }
 
     pub(crate) fn senders(&self) -> Option<Vec<ThreadId>> {

@@ -563,10 +563,7 @@ impl Must {
 
             let g = &self.current.graph;
             let ilab = g.inbox_label(pos).unwrap();
-            let vals = match g.vals_copy(pos) {
-                Some(vs) => vs.into_iter().map(Some).collect(),
-                None => Vec::new(),
-            };
+            let vals = self.inbox_vals_copy(pos);
             return (vals, g.get_receiving_indexes(ilab), false);
         }
 
@@ -1529,7 +1526,7 @@ impl Must {
             return Vec::new();
         }
 
-        let mut combinations = compute_inbox_possible_subsets_from_rfs(&rfs, min, max);
+        let mut combinations = compute_inbox_possible_subsets_from_rfs(&rfs, min, max, None);
 
         // Canonical inbox read used by the base execution:
         // non-blocking inbox reads {}, otherwise read the first `min` coherent sends.
@@ -1559,58 +1556,14 @@ impl Must {
                 .change_inbox_rfs(pos, Some(canonical.clone()));
         }
 
+        self.inbox_vals_copy(pos)
+    }
+
+    fn inbox_vals_copy(&self, pos: Event) -> Vec<Option<Val>> {
         match self.current.graph.vals_copy(pos) {
             Some(vs) => vs.into_iter().map(Some).collect(),
             None => Vec::new(),
         }
-    }
-
-    fn compute_inbox_possible_subsets_from_rfs(
-        events: &[Event],
-        min: usize,
-        max: Option<usize>,
-    ) -> Vec<Vec<Event>> {
-        fn build(
-            idx: usize,
-            events: &[Event],
-            min: usize,
-            max_len: usize,
-            current: &mut Vec<Event>,
-            out: &mut Vec<Vec<Event>>,
-        ) {
-            // Branch-and-bound over subset lattice.
-            if current.len() > max_len {
-                return;
-            }
-            let remaining = events.len() - idx;
-            if current.len() + remaining < min {
-                return;
-            }
-
-            if idx == events.len() {
-                let len = current.len();
-                if len >= min && len <= max_len {
-                    out.push(current.clone());
-                }
-                return;
-            }
-
-            build(idx + 1, events, min, max_len, current, out);
-
-            current.push(events[idx]);
-            build(idx + 1, events, min, max_len, current, out);
-            current.pop();
-        }
-
-        let max_len = max.map_or(events.len(), |m| m.min(events.len()));
-        if min > max_len {
-            return Vec::new();
-        }
-
-        let mut subsets = Vec::new();
-        // Enumerate all subsets within [min, max_len] preserving event identity.
-        build(0, events, min, max_len, &mut Vec::new(), &mut subsets);
-        subsets
     }
 
     fn is_maximal_extension(&self, rev: &Revisit) -> bool {
@@ -1669,35 +1622,6 @@ impl Must {
 
         let send_porf = slab.porf();
 
-        // Helper: generate all subsets of `cands` that contain `must`.
-        fn subsets_containing(cands: &[Event], must: Event) -> Vec<Vec<Event>> {
-            let mut out = Vec::new();
-            let mut cur = Vec::new();
-            fn backtrack(
-                out: &mut Vec<Vec<Event>>,
-                cur: &mut Vec<Event>,
-                cands: &[Event],
-                idx: usize,
-                must: Event,
-                has_must: bool,
-            ) {
-                if idx == cands.len() {
-                    if has_must {
-                        // Keep only subsets that include the freshly added send.
-                        out.push(cur.clone());
-                    }
-                    return;
-                }
-                backtrack(out, cur, cands, idx + 1, must, has_must);
-                cur.push(cands[idx]);
-                let now_has_must = has_must || cands[idx] == must;
-                backtrack(out, cur, cands, idx + 1, must, now_has_must);
-                cur.pop();
-            }
-            backtrack(&mut out, &mut cur, cands, 0, must, false);
-            out
-        }
-
         let mut revs: Vec<RevisitEnum> = Vec::new();
 
         for rl in g.rev_matching_recvs(slab) {
@@ -1739,15 +1663,11 @@ impl Must {
                     cands.sort();
                     cands.dedup();
 
-                    // enumerate subsets that include `pos`
-                    for mut subset in subsets_containing(&cands, pos) {
+                    // Enumerate only subsets that include the freshly added send.
+                    for mut subset in
+                        compute_inbox_possible_subsets_from_rfs(&cands, i.min(), i.max(), Some(pos))
+                    {
                         Consistency::normalize_event_set(&mut subset);
-                        if subset.len() < i.min() {
-                            continue;
-                        }
-                        if !i.has_capacity_for(subset.len()) {
-                            continue;
-                        }
                         // Only generate the subset when the freshly added send
                         // is the owner (newest send in the subset).
                         if Consistency::inbox_owner(&self.current.graph, &subset) != Some(pos) {
@@ -2140,42 +2060,29 @@ impl Must {
 
     // Mark events in the porf-prefix as non revisitable
     fn mark_prefix_non_revisitable(&mut self, revisit_placement: RevisitPlacement) {
+        let mut prefix = VectorClock::new();
         match revisit_placement {
             RevisitPlacement::Default(send) => {
-                let prefix = self.current.graph.send_label(send).unwrap().porf().clone();
-
-                // Iterate on the prefix's labs
-                for thread in self.current.graph.threads.iter_mut() {
-                    let j = thread
-                        .labels
-                        .partition_point(|lab| prefix.contains(lab.pos()));
-                    for lab in &mut thread.labels[..j] {
-                        match lab {
-                            LabelEnum::RecvMsg(rlab) => rlab.set_revisitable(false),
-                            LabelEnum::Inbox(ilab) => ilab.set_revisitable(false),
-                            _ => {}
-                        };
-                    }
-                }
+                prefix.update(self.current.graph.send_label(send).unwrap().porf());
             }
             RevisitPlacement::Inbox(sends) => {
-                let mut prefix = VectorClock::new();
                 // Inbox revisit prefix is the union of porf-prefixes of all chosen sends.
                 for s in sends {
                     prefix.update(self.current.graph.send_label(s).unwrap().porf());
                 }
-                for thread in self.current.graph.threads.iter_mut() {
-                    let j = thread
-                        .labels
-                        .partition_point(|lab| prefix.contains(lab.pos()));
-                    for lab in &mut thread.labels[..j] {
-                        match lab {
-                            LabelEnum::RecvMsg(rlab) => rlab.set_revisitable(false),
-                            LabelEnum::Inbox(ilab) => ilab.set_revisitable(false),
-                            _ => {}
-                        };
-                    }
-                }
+            }
+        }
+
+        for thread in self.current.graph.threads.iter_mut() {
+            let j = thread
+                .labels
+                .partition_point(|lab| prefix.contains(lab.pos()));
+            for lab in &mut thread.labels[..j] {
+                match lab {
+                    LabelEnum::RecvMsg(rlab) => rlab.set_revisitable(false),
+                    LabelEnum::Inbox(ilab) => ilab.set_revisitable(false),
+                    _ => {}
+                };
             }
         }
     }
@@ -2381,7 +2288,7 @@ impl Must {
             self.print_graph_trace(pos)
                 .expect("could not print trace to supplied file");
         }
-        
+
         out
     }
 
@@ -2612,13 +2519,6 @@ impl Must {
         format!("{{{}}}", self.fmt_events(events))
     }
 
-    fn fmt_event_sets(&self, sets: &[Vec<Event>]) -> String {
-        sets.iter()
-            .map(|s| self.fmt_event_set(s))
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-
     fn fmt_revisit_placement(&self, placement: &RevisitPlacement) -> String {
         match placement {
             RevisitPlacement::Default(ev) => ev.to_string(),
@@ -2661,12 +2561,15 @@ fn compute_inbox_possible_subsets_from_rfs(
     events: &[Event],
     min: usize,
     max: Option<usize>,
+    must_include: Option<Event>,
 ) -> Vec<Vec<Event>> {
     fn build(
         idx: usize,
         events: &[Event],
         min: usize,
         max_len: usize,
+        must_include: Option<Event>,
+        has_must: bool,
         current: &mut Vec<Event>,
         out: &mut Vec<Vec<Event>>,
     ) {
@@ -2680,28 +2583,55 @@ fn compute_inbox_possible_subsets_from_rfs(
 
         if idx == events.len() {
             let len = current.len();
-            if len >= min && len <= max_len {
+            if len >= min && len <= max_len && must_include.is_none_or(|_| has_must) {
                 out.push(current.clone());
             }
             return;
         }
 
         // Exclude current event
-        build(idx + 1, events, min, max_len, current, out);
+        build(
+            idx + 1,
+            events,
+            min,
+            max_len,
+            must_include,
+            has_must,
+            current,
+            out,
+        );
 
         // Include current event
         current.push(events[idx]);
-        build(idx + 1, events, min, max_len, current, out);
+        build(
+            idx + 1,
+            events,
+            min,
+            max_len,
+            must_include,
+            has_must || must_include == Some(events[idx]),
+            current,
+            out,
+        );
         current.pop();
     }
 
     let max_len = max.map_or(events.len(), |m| m.min(events.len()));
-    if min > max_len {
+    if min > max_len || must_include.is_some_and(|event| !events.contains(&event)) {
         return Vec::new();
     }
 
     let mut subsets: Vec<Vec<Event>> = Vec::new();
-    build(0, events, min, max_len, &mut Vec::new(), &mut subsets);
+    build(
+        0,
+        events,
+        min,
+        max_len,
+        must_include,
+        false,
+        &mut Vec::new(),
+        &mut subsets,
+    );
     subsets
 }
 

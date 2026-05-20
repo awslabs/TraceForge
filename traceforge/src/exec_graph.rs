@@ -626,8 +626,8 @@ impl ExecutionGraph {
         matches!(self.label(e), LabelEnum::SendMsg(_))
     }
 
-    pub(crate) fn are_sends(&self, events: Vec<Event>) -> bool {
-        for ev in events {
+    pub(crate) fn are_sends(&self, events: &[Event]) -> bool {
+        for &ev in events {
             let m = matches!(self.label(ev), LabelEnum::SendMsg(_));
             if !m {
                 return false;
@@ -821,7 +821,7 @@ impl ExecutionGraph {
 
     pub(crate) fn change_inbox_rfs(&mut self, inbox: Event, sends: Option<Vec<Event>>) {
         assert!(self.is_inbox(inbox));
-        assert!(sends.as_ref().is_none() || self.are_sends(sends.as_ref().unwrap().clone()));
+        assert!(sends.as_ref().is_none_or(|sends| self.are_sends(sends)));
 
         // Recompute reader edges for the inbox atomically: clear old edges first.
         self.remove_from_readers_inbox(inbox);
@@ -1202,8 +1202,8 @@ impl ExecutionGraph {
     /// This helps us obtain a minimal execution trace since there might be other
     /// nodes in the graph that are not relevant to the assertion violation.
     pub(crate) fn top_sort(&self, pos: Option<Event>) -> REPLAY::TopologicallySortedExecutionGraph {
-        let maxs = if pos.is_some() {
-            vec![pos.unwrap()]
+        let maxs = if let Some(ev) = pos {
+            vec![ev]
         } else {
             self.threads
                 .iter()
