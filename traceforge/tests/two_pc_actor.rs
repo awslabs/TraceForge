@@ -263,6 +263,7 @@ mod tests {
             Config::builder()
                 .with_cons_type(ConsType::FIFO)
                 .with_progress_report(100)
+                .with_print_all_graphs_dot("my_graphs")
                 .with_verbose(1)
                 .with_trace_out("/tmp/twopc.traces")
                 .build(),

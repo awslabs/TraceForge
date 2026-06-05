@@ -856,6 +856,18 @@ impl SendMsg {
         self.val = other.val;
     }
 
+    /// A compact label for graph (DOT) rendering. Unlike the full `Display`, it
+    /// omits the destination (which is conveyed by the reads-from edge) and the
+    /// value's type, showing only the sent value, e.g. `(t0, 3): SEND(42)`.
+    pub(crate) fn dot_label(&self) -> String {
+        format!(
+            "{}: SEND({}){}",
+            self.label,
+            self.val().display_value(),
+            if self.is_dropped() { " [dropped]" } else { "" }
+        )
+    }
+
     pub(crate) fn recover_lost(&mut self, other: Self) {
         self.val = other.val;
         self.monitor_sends = other.monitor_sends;

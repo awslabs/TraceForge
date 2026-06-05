@@ -45,6 +45,24 @@ impl Val {
         self.val.clone().msg_as_any()
     }
 
+    /// A compact rendering of just the contained value, without the surrounding
+    /// `Val { .. }` wrapper or the `type_name`. Used for concise graph labels.
+    /// Returns an empty string when value printing is disabled at compile time.
+    pub(crate) fn display_value(&self) -> String {
+        #[cfg(feature = "print_vals_custom")]
+        {
+            format!("{}", self.val)
+        }
+        #[cfg(all(feature = "print_vals", not(feature = "print_vals_custom")))]
+        {
+            format!("{:?}", self.val)
+        }
+        #[cfg(not(any(feature = "print_vals", feature = "print_vals_custom")))]
+        {
+            String::new()
+        }
+    }
+
     pub fn as_any_ref(&self) -> &dyn Any {
         self.val.msg_as_any_ref()
     }

@@ -230,6 +230,8 @@ pub struct Config {
     pub(crate) vr: bool,
     pub(crate) lossy_budget: usize,
     pub(crate) dot_file: Option<String>,
+    pub(crate) print_all_graphs_dot: Option<String>,
+    pub(crate) print_all_graphs_limit: usize,
     pub(crate) trace_file: Option<String>,
     pub(crate) error_trace_file: Option<String>,
     pub(crate) turmoil_trace_file: Option<String>,
@@ -260,6 +262,9 @@ impl Config {
     pub(crate) fn rename_files(&mut self, suffix: String) {
         if let Some(dot) = &self.dot_file {
             self.dot_file = Some(dot.to_owned() + &suffix);
+        }
+        if let Some(dir) = &self.print_all_graphs_dot {
+            self.print_all_graphs_dot = Some(dir.to_owned() + &suffix);
         }
         if let Some(trace) = &self.trace_file {
             self.trace_file = Some(trace.to_owned() + &suffix);
@@ -303,6 +308,8 @@ impl ConfigBuilder {
             vr: false,
             lossy_budget: 0,
             dot_file: None,
+            print_all_graphs_dot: None,
+            print_all_graphs_limit: 500,
             trace_file: None,
             error_trace_file: None,
             turmoil_trace_file: None,
@@ -459,6 +466,35 @@ impl ConfigBuilder {
     /// See with_verbose() for more information
     pub fn with_dot_out(mut self, filename: &str) -> Self {
         self.0.dot_file = Some(filename.to_string());
+        self
+    }
+
+    /// Stores *every* complete execution graph explored during verification in
+    /// the given folder (a relative path), together with an `index.html` web
+    /// page that lists all of them and links to a rendered image of each graph.
+    ///
+    /// Each consistent complete execution is written as `graph_<n>.dot`. At the
+    /// end of exploration, every `.dot` file is rendered to an SVG image using
+    /// the Graphviz `dot` command (which must be installed and on the `PATH`),
+    /// and `index.html` is generated in the same folder. If `dot` is not
+    /// available, the `.dot` files are still written and the index links to them
+    /// directly.
+    ///
+    /// Unlike [`with_dot_out`](Self::with_dot_out), this is independent of the
+    /// verbosity level and captures *all* execution graphs, not just
+    /// counterexamples.
+    pub fn with_print_all_graphs_dot(mut self, folder: &str) -> Self {
+        self.0.print_all_graphs_dot = Some(folder.to_string());
+        self
+    }
+
+    /// Caps how many execution graphs [`with_print_all_graphs_dot`] writes in a
+    /// single run (default 500). Once the limit is reached, further graphs are
+    /// skipped (a log message reports this). This bounds the output for runs
+    /// that explore very many executions — including runs where most executions
+    /// end blocked, since blocked executions are captured too.
+    pub fn with_print_all_graphs_limit(mut self, limit: usize) -> Self {
+        self.0.print_all_graphs_limit = limit;
         self
     }
 

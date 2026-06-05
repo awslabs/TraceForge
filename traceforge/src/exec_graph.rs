@@ -305,6 +305,11 @@ impl ExecutionGraph {
         self.get_thr(&tid).tclab.clone()
     }
 
+    /// The user-assigned name of a thread, if it was spawned with one.
+    pub(crate) fn thread_name(&self, tid: ThreadId) -> Option<String> {
+        self.get_thr_opt(&tid).and_then(|ti| ti.tclab.name().clone())
+    }
+
     pub(crate) fn tid_for_spawn(&self, pos: &Event, origination_vec: &[u32]) -> ThreadId {
         assert_eq!(origination_vec.last(), Some(&pos.index));
 

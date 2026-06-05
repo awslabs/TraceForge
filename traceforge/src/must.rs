@@ -148,6 +148,21 @@ pub(crate) struct Must {
     pub(crate) global_named_choices: HashMap<String, bool>,
     // Maximum number of events across all complete (non-blocked) execution graphs
     max_graph_events: usize,
+    // Number of execution graphs written so far by the `print_all_graphs_dot`
+    // option (bounded by `config.print_all_graphs_limit`).
+    graphs_dumped: usize,
+}
+
+/// Escapes `&`, `<` and `>` so that `text` can be safely embedded inside a
+/// Graphviz HTML-like label (the `[label=<...>]` form). Without this, label
+/// text containing characters such as `<` (e.g. Rust type names like
+/// `PhantomData<()>`) produces a malformed graph that no Graphviz renderer can
+/// parse. The `&` replacement must come first so already-escaped entities are
+/// not double-escaped.
+fn html_escape_label(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 impl Must {
@@ -162,6 +177,18 @@ impl Must {
         let _ = telemetry.register_counter(&EXECS.to_owned());
         let _ = telemetry.register_counter(&BLOCKED.to_owned());
         let _ = telemetry.register_histogram(&EXECS_EST.to_owned());
+
+        // Start each verification run with a fresh execution-graph folder so it
+        // never contains stale graphs from a previous run. (Skipped in replay
+        // mode, which reproduces a single trace and must not wipe the graphs.)
+        if !replay_mode {
+            if let Some(folder) = &conf.print_all_graphs_dot {
+                let _ = std::fs::remove_dir_all(folder);
+                if let Err(e) = std::fs::create_dir_all(folder) {
+                    warn!("Could not create folder '{}' for execution graphs: {}", folder, e);
+                }
+            }
+        }
 
         Self {
             states: Vec::new(),
@@ -185,6 +212,7 @@ impl Must {
             symbolic_solver: SymbolicSolver::new(),
             global_named_choices: HashMap::new(),
             max_graph_events: 0,
+            graphs_dumped: 0,
         }
     }
 
@@ -1235,6 +1263,9 @@ impl Must {
                 if event_count > self.max_graph_events {
                     self.max_graph_events = event_count;
                 }
+                if self.config.print_all_graphs_dot.is_some() {
+                    self.dump_graph();
+                }
                 if self.config.verbose >= 2 {
                     println!("One more blocked execution");
                     println!("{}", self.print_graph(None));
@@ -1248,6 +1279,9 @@ impl Must {
                 self.max_graph_events = event_count;
             }
             self.print_turmoil_trace();
+            if self.config.print_all_graphs_dot.is_some() {
+                self.dump_graph();
+            }
             if self.config.verbose >= 1 {
                 println!("One more complete execution");
                 println!("{}", self.print_graph(None));
@@ -2008,13 +2042,7 @@ impl Must {
     }
 
     fn print_graph_dot(&self, error: Option<Event>) -> std::io::Result<()> {
-        let v = if let Some(event) = error {
-            self.current.graph.porf(event)
-        } else {
-            self.current
-                .graph
-                .view_from_stamp(self.current.graph.stamp())
-        };
+        let dot = self.graph_to_dot(error);
         let num_execs = self.telemetry.read_counter(EXECS.to_owned()).unwrap_or(0);
         let create_file = error.is_some() || num_execs == 1;
         let mut out_file = std::fs::OpenOptions::new()
@@ -2025,73 +2053,427 @@ impl Must {
             .append(false)
             .open(self.config.dot_file.as_ref().unwrap())
             .unwrap();
+        std::io::Write::write(&mut out_file, dot.as_bytes())?;
+        Ok(())
+    }
 
-        std::io::Write::write(
-            &mut out_file,
-            "strict digraph {\n\
-            node [shape=plaintext]\n\
-            labeljust=l\n\
-            splines=false\n"
-                .to_string()
-                .as_bytes(),
-        )?;
+    /// Renders the current execution graph in Graphviz DOT format and returns it
+    /// as a string. When `error` is set, only the `porf` view of the erroneous
+    /// event is shown and that event is highlighted; otherwise the full graph is
+    /// rendered.
+    fn graph_to_dot(&self, error: Option<Event>) -> String {
+        let v = if let Some(event) = error {
+            self.current.graph.porf(event)
+        } else {
+            self.current
+                .graph
+                .view_from_stamp(self.current.graph.stamp())
+        };
 
         let g = &self.current.graph;
-        for (tid, ind) in v.entries() {
-            std::io::Write::write(
-                &mut out_file,
-                format!("subgraph cluster_{} {{\n", tid).as_bytes(),
-            )?;
-            std::io::Write::write(
-                &mut out_file,
-                format!("\tlabel=\"thread {}\"\n", tid).as_bytes(),
-            )?;
-            for j in 1..ind {
-                let pos = Event::new(tid, j);
-                let is_error = error.is_some() && error.unwrap() == pos;
-                std::io::Write::write(
-                    &mut out_file,
-                    format!(
-                        "\t\"{}\" [label=<{}>{}]\n",
-                        pos,
-                        g.label(pos),
-                        if is_error {
-                            ",style=filled,fillcollor=yellow"
-                        } else {
-                            ""
-                        }
-                    )
-                    .as_bytes(),
-                )?;
+
+        // Collect, per thread, the indices of the events that are part of the
+        // view and worth showing. `entries()` yields `ind` = the index of the
+        // *last* event of the thread in the view, so the events are `1..=ind`
+        // (index 0 is the synthetic BEGIN). The BEGIN/END pseudo-events are not
+        // shown as labelled boxes: BEGIN/END are instead drawn as dots (the
+        // begin/end markers of each thread's column).
+        let threads: Vec<(ThreadId, Vec<u32>, bool)> = v
+            .entries()
+            .map(|(tid, ind)| {
+                let events: Vec<u32> = (1..=ind)
+                    .filter(|&j| {
+                        !matches!(
+                            g.label(Event::new(tid, j)),
+                            LabelEnum::Begin(_) | LabelEnum::End(_)
+                        )
+                    })
+                    .collect();
+                // A thread that has finished ends with an END label at its last
+                // index; we render that as an "end" dot at the bottom.
+                let has_end = ind >= 1 && matches!(g.label(Event::new(tid, ind)), LabelEnum::End(_));
+                (tid, events, has_end)
+            })
+            .collect();
+
+        let thread_ids: HashSet<ThreadId> = threads.iter().map(|(tid, _, _)| *tid).collect();
+
+        // For join edges: the node from which a finished thread is joined. This
+        // is its end dot if it has one, otherwise its last event, otherwise its
+        // begin dot.
+        let exit_id = |tid: ThreadId, events: &[u32], has_end: bool| -> String {
+            if has_end {
+                format!("end_{}", tid)
+            } else if let Some(&last) = events.last() {
+                format!("{}", Event::new(tid, last))
+            } else {
+                format!("begin_{}", tid)
             }
-            std::io::Write::write(&mut out_file, "}\n".to_string().as_bytes())?;
+        };
+
+        let mut out = String::new();
+        out.push_str(
+            "strict digraph {\n\
+            node [shape=box]\n\
+            rankdir=TB\n\
+            labeljust=l\n",
+        );
+
+        // One column per thread: a synthetic "begin" dot at the top, all of the
+        // thread's events below it, an "end" dot at the bottom if the thread
+        // finished, and a `group` so Graphviz keeps the whole chain on a single
+        // straight vertical line.
+        for (tid, events, has_end) in &threads {
+            // Each thread's column starts with a labelled box. Use the thread's
+            // user-assigned name if it has one (e.g. "coordinator 1"), otherwise
+            // fall back to "thread tN".
+            let header = match g.thread_name(*tid) {
+                Some(name) => html_escape_label(&name),
+                None => format!("thread {}", tid),
+            };
+            out.push_str(&format!(
+                "\"begin_{0}\" [label=<<b>{1}</b>>, group=\"{0}\"]\n",
+                tid, header
+            ));
+            for &j in events {
+                let pos = Event::new(*tid, j);
+                let is_error = error.is_some() && error.unwrap() == pos;
+                // The label is emitted inside `<...>`, i.e. as a Graphviz
+                // HTML-like label, so any `&`, `<` or `>` in the label text
+                // (e.g. Rust type names like `PhantomData<()>`) must be escaped
+                // as entities, or the graph fails to parse.
+                //
+                // Sends use a compact label that drops the destination (shown by
+                // the reads-from edge) and the value's type.
+                let raw_label = match g.label(pos) {
+                    LabelEnum::SendMsg(s) => s.dot_label(),
+                    other => format!("{}", other),
+                };
+                // Drop the leading "(tX, n): " position prefix; the event's
+                // column and vertical position already convey it.
+                let prefix = format!("{}: ", pos);
+                let raw_label = raw_label.strip_prefix(&prefix).unwrap_or(&raw_label);
+                let label = html_escape_label(raw_label);
+                out.push_str(&format!(
+                    "\"{}\" [label=<{}>, group=\"{}\"{}]\n",
+                    pos,
+                    label,
+                    tid,
+                    if is_error {
+                        ",style=filled,fillcolor=yellow"
+                    } else {
+                        ""
+                    }
+                ));
+            }
+            if *has_end {
+                out.push_str(&format!(
+                    "\"end_{0}\" [shape=point, width=0.12, group=\"{0}\"]\n",
+                    tid
+                ));
+            }
+
+            // Vertical program-order chain: begin dot -> events... -> end dot.
+            let mut chain: Vec<String> = Vec::with_capacity(events.len() + 2);
+            chain.push(format!("begin_{}", tid));
+            chain.extend(events.iter().map(|&j| format!("{}", Event::new(*tid, j))));
+            if *has_end {
+                chain.push(format!("end_{}", tid));
+            }
+            for pair in chain.windows(2) {
+                out.push_str(&format!("\"{}\" -> \"{}\"\n", pair[0], pair[1]));
+            }
         }
 
-        for (tid, ind) in v.entries() {
-            for j in 1..ind + 1 {
-                let pos = Event::new(tid, j);
-                if j < ind {
-                    // last event for this thread
-                    std::io::Write::write(
-                        &mut out_file,
-                        format!("\"{}\" -> \"{}\"\n", pos, pos.next()).as_bytes(),
-                    )?;
+        // Cross-thread edges (create, join, reads-from) all use `weight=0`. They
+        // remain ranking edges (`constraint` defaults to true), so they still
+        // enforce the vertical ordering — a child begins below its TCREATE, a
+        // join sits below the joined thread's exit, and a receive sits below its
+        // send — but contribute nothing to horizontal placement. That leaves each
+        // thread's `group` chain free to form a straight vertical column instead
+        // of being pulled sideways toward the threads it communicates with.
+
+        // Thread-management edges: each TCREATE points to the begin dot of the
+        // thread it spawns, and each joined thread's exit points to the TJOIN
+        // event that joins it. Drawn in blue (dashed for joins) to set them
+        // apart from program-order and reads-from edges.
+        for (tid, events, _) in &threads {
+            for &j in events {
+                let pos = Event::new(*tid, j);
+                match g.label(pos) {
+                    LabelEnum::TCreate(tc) => {
+                        let cid = tc.cid();
+                        if thread_ids.contains(&cid) {
+                            out.push_str(&format!(
+                                "\"{}\" -> \"begin_{}\" [color=blue, weight=0]\n",
+                                pos, cid
+                            ));
+                        }
+                    }
+                    LabelEnum::TJoin(tj) => {
+                        let cid = tj.cid();
+                        if let Some((_, cevents, chas_end)) =
+                            threads.iter().find(|(t, _, _)| *t == cid)
+                        {
+                            out.push_str(&format!(
+                                "\"{}\" -> \"{}\" [color=blue, style=dashed, weight=0]\n",
+                                exit_id(cid, cevents, *chas_end),
+                                pos
+                            ));
+                        }
+                    }
+                    _ => {}
                 }
+            }
+        }
+
+        // Reads-from edges across threads (see the note above on `weight=0`).
+        for (tid, events, _) in &threads {
+            for &j in events {
+                let pos = Event::new(*tid, j);
                 if g.is_recv(pos) {
                     let rlab = g.recv_label(pos).unwrap();
-                    if rlab.rf().is_some() {
-                        std::io::Write::write(
-                            &mut out_file,
-                            format!("\"{}\" -> \"{}\"[color=green]\n", rlab.rf().unwrap(), pos)
-                                .as_bytes(),
-                        )?;
+                    if let Some(rf) = rlab.rf() {
+                        out.push_str(&format!("\"{}\" -> \"{}\" [color=green, weight=0]\n", rf, pos));
                     }
                 }
             }
         }
 
-        std::io::Write::write(&mut out_file, "}\n".to_string().as_bytes())?;
-        Ok(())
+        out.push_str("}\n");
+        out
+    }
+
+    /// Writes the current execution graph (complete or blocked) to
+    /// `graph_<n>.dot` inside the folder configured via
+    /// [`with_print_all_graphs_dot`], renders an image for it, and refreshes the
+    /// `index.html` listing. Graphs are numbered sequentially in the order they
+    /// are produced, up to `config.print_all_graphs_limit`; once that many have
+    /// been written, further graphs are skipped.
+    ///
+    /// The per-graph rendering and index refresh happen here, after *every*
+    /// dumped execution, rather than once at the end of exploration. This way the
+    /// web page is always complete and up to date even when verification ends
+    /// abnormally (e.g. it panics on a detected counterexample, which is the
+    /// common reason to run a model checker), since such runs never reach the
+    /// end-of-exploration code.
+    fn dump_graph(&mut self) {
+        let Some(folder) = self.config.print_all_graphs_dot.clone() else {
+            return;
+        };
+        let limit = self.config.print_all_graphs_limit;
+        if self.graphs_dumped >= limit {
+            return;
+        }
+        let dir = std::path::Path::new(&folder);
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            warn!("Could not create folder '{}' for execution graphs: {}", folder, e);
+            return;
+        }
+        self.graphs_dumped += 1;
+        let n = self.graphs_dumped;
+        let dot = self.graph_to_dot(None);
+        let dot_path = dir.join(format!("graph_{}.dot", n));
+        if let Err(e) = std::fs::write(&dot_path, &dot) {
+            warn!("Could not write execution graph to '{}': {}", dot_path.display(), e);
+            return;
+        }
+        self.render_graph_image(dir, n as u64, &dot);
+        self.regenerate_index(dir);
+        if self.graphs_dumped == limit {
+            warn!(
+                "Reached the execution-graph limit of {} for '{}'; further graphs will not be \
+                 dumped (raise it with `Config::with_print_all_graphs_limit`).",
+                limit, folder
+            );
+        }
+    }
+
+    /// Renders the single graph `graph_<n>.dot` to an interactive
+    /// `graph_<n>.html` page that can be panned and zoomed in the browser.
+    ///
+    /// If the Graphviz `dot` command is available, its SVG output is rendered
+    /// locally and embedded inline in the page (so the image itself needs no
+    /// internet); otherwise the page renders the DOT source in-browser via a
+    /// Graphviz JavaScript library loaded from a CDN. Either way, the embedded
+    /// SVG is made pannable/zoomable with the `svg-pan-zoom` library.
+    fn render_graph_image(&self, dir: &std::path::Path, n: u64, dot_src: &str) {
+        let svg = std::process::Command::new("dot")
+            .arg("-Tsvg")
+            .arg(dir.join(format!("graph_{}.dot", n)))
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+
+        let page = match svg {
+            Some(svg) => Self::render_static_page_html(n, &svg),
+            None => {
+                if n == 1 {
+                    // Warn just once (on the first graph) to avoid spamming.
+                    warn!(
+                        "Graphviz `dot` was not available, so execution graphs in '{}' are \
+                         rendered in the browser via a CDN library (viewing requires internet \
+                         access). Install Graphviz and re-run for offline image rendering.",
+                        dir.display()
+                    );
+                }
+                Self::render_dynamic_page_html(n, dot_src)
+            }
+        };
+        let page_path = dir.join(format!("graph_{}.html", n));
+        if let Err(e) = std::fs::write(&page_path, page) {
+            warn!("Could not write '{}': {}", page_path.display(), e);
+        }
+    }
+
+    /// (Re)writes `index.html` in the execution-graph folder, listing every
+    /// `graph_<n>.dot` collected so far and linking each to its interactive
+    /// `graph_<n>.html` page (falling back to the raw `.dot` file if, for some
+    /// reason, the page was not written).
+    fn regenerate_index(&self, dir: &std::path::Path) {
+        // Collect the graph_<n>.dot files and sort them by execution number.
+        let mut graphs: Vec<u64> = match std::fs::read_dir(dir) {
+            Ok(entries) => entries
+                .filter_map(|e| e.ok())
+                .filter_map(|e| {
+                    let name = e.file_name().into_string().ok()?;
+                    name.strip_prefix("graph_")?.strip_suffix(".dot")?.parse().ok()
+                })
+                .collect(),
+            Err(e) => {
+                warn!("Could not read execution-graph folder '{}': {}", dir.display(), e);
+                return;
+            }
+        };
+        graphs.sort_unstable();
+
+        if graphs.is_empty() {
+            return;
+        }
+
+        let mut entries = String::new();
+        for n in &graphs {
+            // Link to the interactive page, falling back to the raw dot file.
+            let link = if dir.join(format!("graph_{}.html", n)).exists() {
+                format!("graph_{}.html", n)
+            } else {
+                format!("graph_{}.dot", n)
+            };
+            entries.push_str(&format!(
+                "    <li><a href=\"{0}\">Execution {1}</a></li>\n",
+                link, n
+            ));
+        }
+
+        let html = format!(
+            "<!DOCTYPE html>\n\
+             <html>\n\
+             <head>\n\
+             <meta charset=\"utf-8\">\n\
+             <title>TraceForge execution graphs</title>\n\
+             </head>\n\
+             <body>\n\
+             <h1>Execution graphs ({} total)</h1>\n\
+             <ul>\n\
+             {}</ul>\n\
+             </body>\n\
+             </html>\n",
+            graphs.len(),
+            entries
+        );
+        let index_path = dir.join("index.html");
+        if let Err(e) = std::fs::write(&index_path, html) {
+            warn!("Could not write '{}': {}", index_path.display(), e);
+        }
+    }
+
+    /// Wraps the page body in the common HTML shell: a top toolbar (link back to
+    /// the index, execution number, usage hint) and a full-height `#graph`
+    /// container. `head_extra` holds page-specific `<script>` tags.
+    fn page_shell(n: u64, head_extra: &str, body: &str) -> String {
+        const STYLE: &str = "<style>\n\
+            html, body { margin: 0; height: 100%; }\n\
+            #toolbar { padding: 6px 10px; font-family: sans-serif; font-size: 13px; \
+            background: #f4f4f4; border-bottom: 1px solid #ccc; }\n\
+            #graph { width: 100%; height: calc(100% - 33px); }\n\
+            #graph svg { width: 100%; height: 100%; }\n\
+            </style>\n";
+        format!(
+            "<!DOCTYPE html>\n\
+             <html>\n\
+             <head>\n\
+             <meta charset=\"utf-8\">\n\
+             <title>Execution {n}</title>\n\
+             <script src=\"https://unpkg.com/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js\"></script>\n\
+             {head_extra}{STYLE}\
+             </head>\n\
+             <body>\n\
+             <div id=\"toolbar\"><a href=\"index.html\">&larr; all executions</a> &nbsp;&middot;&nbsp; \
+             Execution {n} &nbsp;&middot;&nbsp; scroll to zoom, drag to pan</div>\n\
+             {body}\
+             </body>\n\
+             </html>\n"
+        )
+    }
+
+    /// Builds an interactive page for a graph whose SVG has already been rendered
+    /// locally by Graphviz `dot`. The SVG is embedded inline and made
+    /// pannable/zoomable with `svg-pan-zoom`. The image needs no internet; only
+    /// the `svg-pan-zoom` script is loaded from a CDN.
+    fn render_static_page_html(n: u64, svg: &str) -> String {
+        // Strip the XML/DOCTYPE prolog so the `<svg>` can be embedded inline.
+        let svg_inline = match svg.find("<svg") {
+            Some(i) => &svg[i..],
+            None => svg,
+        };
+        const SCRIPT: &str = "<script>\n\
+            window.addEventListener(\"load\", function () {\n\
+            \tvar svg = document.querySelector(\"#graph svg\");\n\
+            \tif (!svg) return;\n\
+            \tsvg.setAttribute(\"width\", \"100%\");\n\
+            \tsvg.setAttribute(\"height\", \"100%\");\n\
+            \tsvgPanZoom(svg, { controlIconsEnabled: true, fit: true, center: true, minZoom: 0.05, maxZoom: 50 });\n\
+            });\n\
+            </script>\n";
+        let body = format!("<div id=\"graph\">{svg_inline}</div>\n{SCRIPT}");
+        Self::page_shell(n, "", &body)
+    }
+
+    /// Builds an interactive page that renders the DOT `source` in the browser
+    /// using the `@viz-js/viz` library loaded from a CDN. Used as a fallback when
+    /// the Graphviz `dot` command is not available locally.
+    ///
+    /// `@viz-js/viz`'s standalone build inlines its WebAssembly module into a
+    /// single script, so (unlike `d3-graphviz`/`@hpcc-js/wasm`) it performs no
+    /// secondary fetch and renders correctly even when the page is opened from a
+    /// `file://` URL. The rendered SVG is then made pannable/zoomable with
+    /// `svg-pan-zoom`. Loading the scripts requires internet access.
+    fn render_dynamic_page_html(n: u64, source: &str) -> String {
+        // Embed the DOT source as a JS string literal. serde_json escapes
+        // quotes, backslashes and control characters; we additionally escape
+        // `</` so a label can never close the surrounding <script> element.
+        let js_literal = serde_json::to_string(source)
+            .unwrap_or_else(|_| "\"\"".to_string())
+            .replace("</", "<\\/");
+        const RENDER_JS: &str = "Viz.instance().then(function (viz) {\n\
+            \tvar container = document.getElementById(\"graph\");\n\
+            \tcontainer.textContent = \"\";\n\
+            \tvar svg = viz.renderSVGElement(dotSource);\n\
+            \tsvg.setAttribute(\"width\", \"100%\");\n\
+            \tsvg.setAttribute(\"height\", \"100%\");\n\
+            \tcontainer.appendChild(svg);\n\
+            \tsvgPanZoom(svg, { controlIconsEnabled: true, fit: true, center: true, minZoom: 0.05, maxZoom: 50 });\n\
+            }).catch(function (err) {\n\
+            \tdocument.getElementById(\"graph\").textContent = \"Failed to render graph: \" + err;\n\
+            });\n";
+        let head_extra =
+            "<script src=\"https://unpkg.com/@viz-js/viz@3.2.4/lib/viz-standalone.js\"></script>\n";
+        let body = format!(
+            "<div id=\"graph\">Rendering graph&hellip; (this needs internet access)</div>\n\
+             <script>\nvar dotSource = {js_literal};\n{RENDER_JS}</script>\n"
+        );
+        Self::page_shell(n, head_extra, &body)
     }
 
     fn print_graph_trace(&self, error: Option<Event>) -> std::io::Result<()> {
