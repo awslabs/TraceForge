@@ -1043,6 +1043,7 @@ impl Must {
         solver
     }
 
+    // TODO: This code is never run. Change it in the future.
     #[cfg(feature = "symbolic")]
     fn symbolic_backward_revisit_is_sat(&self, rev: &Revisit) -> bool {
         if !self.config.symbolic {
@@ -1051,7 +1052,7 @@ impl Must {
 
         let view = self.current.graph.revisit_view(rev);
         let mut g = self.current.graph.copy_to_view(&view);
-        g.change_rf(rev.pos, Some(rev.rev));
+        g.change_rf_placement(rev.pos, &rev.rev);
 
         self.symbolic_solver_for_graph(&g).is_sat()
     }
@@ -1060,7 +1061,7 @@ impl Must {
     fn is_maximal_constraint(&self, c: &ConstraintEval, rev: &Revisit) -> bool {
         let view = self.current.graph.revisit_view(rev);
         let mut g = self.current.graph.copy_to_view(&view);
-        g.change_rf(rev.pos, Some(rev.rev));
+        g.change_rf_placement(rev.pos, &rev.rev);
 
         let solver = self.symbolic_solver_for_graph(&g);
 
@@ -2157,25 +2158,7 @@ impl Must {
 
     /// Change an rf according to the revisit
     fn change_rf(&mut self, rev: &Revisit) {
-        match &rev.rev {
-            RevisitPlacement::Default(vv) => {
-                // Standard recv revisit: single rf edge.
-                self.current.graph.change_rf(rev.pos, Some(*vv));
-            }
-            RevisitPlacement::Inbox(vv) => {
-                // Inbox revisit: whole set of chosen sends.
-                if vv.is_empty() {
-                    self.current.graph.change_inbox_rfs(rev.pos, None);
-                } else {
-                    let mut vv_sorted = vv.clone();
-                    // Keep a canonical order for deterministic comparisons/printing.
-                    vv_sorted.sort();
-                    self.current
-                        .graph
-                        .change_inbox_rfs(rev.pos, Some(vv_sorted));
-                }
-            }
-        }
+        self.current.graph.change_rf_placement(rev.pos, &rev.rev);
     }
 
     fn pick_revisit(&mut self, revs: Vec<Event>, pos: Event) {
