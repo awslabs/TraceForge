@@ -839,6 +839,30 @@ impl ExecutionGraph {
         }
     }
 
+    /// Change the rf of `pos` according to a revisit placement, dispatching to
+    /// `change_rf` for a single send or `change_inbox_rfs` for a whole inbox
+    /// send set. Used both for in-place revisits and for the symbolic what-if
+    /// checks that operate on a copied graph.
+    pub(crate) fn change_rf_placement(&mut self, pos: Event, placement: &RevisitPlacement) {
+        match placement {
+            RevisitPlacement::Default(send) => {
+                // Standard recv revisit: single rf edge.
+                self.change_rf(pos, Some(*send));
+            }
+            RevisitPlacement::Inbox(sends) => {
+                // Inbox revisit: whole set of chosen sends.
+                if sends.is_empty() {
+                    self.change_inbox_rfs(pos, None);
+                } else {
+                    let mut sorted = sends.clone();
+                    // Keep a canonical order for deterministic comparisons/printing.
+                    sorted.sort();
+                    self.change_inbox_rfs(pos, Some(sorted));
+                }
+            }
+        }
+    }
+
     fn check_spawn_invariants(&self) {
         // This function checks the consistency of the information about which thread spawned
         // which, and at what event number.
