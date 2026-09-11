@@ -13,8 +13,9 @@ use log::debug;
 
 // The intended semantics of consistent(G) is
 // 1. porf-acyclic(G)
-// 2. for each communication model M, the restriction of G
-// to events of models not stronger than M is consistent under M
+// 2. for each communication model M used in G, G satisfies M's
+//    consistency constraints, stated over the whole graph and its full
+//    porf causality (Must, Defs. 3.4-3.8)
 // 3. receive events of monitors act as if they are CausalOrder
 
 pub(crate) struct Consistency {}
@@ -359,22 +360,19 @@ impl Consistency {
         if let Some(rlab) = g.recv_label(prev) {
             if let Some(rf) = rlab.rf() {
                 porf.update(g.label(rf).cached_porf());
-                match rlab.comm() {
-                    CommunicationModel::TotalOrder => { /* empty */ }
-                    // posw does *not* include rf from TotalOrder events
-                    _ => posw.update(g.label(rf).cached_posw()),
-                }
+                // rf edges of every model contribute to posw: causality
+                // (Must Def. 3.6's so) is defined over the graph's full
+                // porf, including paths through TotalOrder (mailbox)
+                // events, which were previously excluded here.
+                posw.update(g.label(rf).cached_posw());
             }
         }
         if let Some(ilab) = g.inbox_label(prev) {
             if let Some(rfs) = ilab.rfs() {
                 for rf in rfs {
                     porf.update(g.label(rf).cached_porf());
-                    match ilab.comm() {
-                        CommunicationModel::TotalOrder => { /* empty */ }
-                        // posw does *not* include rf from TotalOrder events
-                        _ => posw.update(g.label(rf).cached_posw()),
-                    }
+                    // See the RecvMsg arm above: full-porf causality.
+                    posw.update(g.label(rf).cached_posw());
                 }
             }
         }

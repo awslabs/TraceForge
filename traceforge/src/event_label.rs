@@ -415,9 +415,16 @@ pub(crate) struct EventLabel {
     /// and is relevant outside consistency checking as well.
     cached_porf: VectorClock,
 
-    // Similar to cached porf, but posw = (po U sw)^+,
-    // where sw is rf restricted to events up to CausalOrder (i.e. not TotalOrder).
-    // This is useful for checking consistency under CausalOrder.
+    // Similar to cached porf, but posw = (po U sw)^+, where sw is rf
+    // together with the create/begin and end/join edges. This is the
+    // causality that CausalOrder delivery is checked against; see
+    // Consistency::calc_views.
+    //
+    // NOTE: rf edges of every communication model contribute to sw, so
+    // this view currently coincides with cached_porf. The two are kept
+    // separate because they are distinct concepts; collapsing them is a
+    // mechanical simplification, deliberately left out of the soundness
+    // fix that made them equal.
     cached_posw: VectorClock,
 }
 
