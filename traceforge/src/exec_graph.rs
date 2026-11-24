@@ -10,6 +10,7 @@ use crate::loc::{Loc, RecvLoc};
 use crate::revisit::{Revisit, RevisitPlacement};
 use crate::runtime::task::TaskId;
 use crate::thread::{construct_thread_id, main_thread_id};
+use crate::trace_print::Mark;
 use crate::vector_clock::VectorClock;
 use crate::{event_label::*, Val};
 use crate::{replay as REPLAY, ThreadId};
@@ -18,9 +19,9 @@ use log::debug;
 /// Encapsulates the execution information about a single thread
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct ThreadInfo {
-    tid: ThreadId,
+    pub(crate) tid: ThreadId,
     task_id: Option<TaskId>,
-    tclab: TCreate,
+    pub(crate) tclab: TCreate,
     pub(crate) labels: Vec<LabelEnum>,
 }
 
@@ -44,6 +45,10 @@ pub(crate) struct ExecutionGraph {
     /// Debug: set of all events at the start of execution, events removed as they are replayed.
     #[serde(skip)]
     pub(crate) unreplayed_events: HashSet<Event>,
+    /// Marks for the pretty printer, keyed by the event that created the thread or channel.
+    /// Exploration never reads them.
+    #[serde(skip)]
+    marks: BTreeMap<Event, Mark>,
 }
 
 impl ExecutionGraph {
@@ -64,7 +69,25 @@ impl ExecutionGraph {
             recvs: HashMap::new(),
             dropped_sends: 0,
             unreplayed_events: HashSet::new(),
+            marks: BTreeMap::new(),
         }
+    }
+
+    /// Sets or clears the mark of the thread or channel created at `e`.
+    pub(crate) fn set_mark(&mut self, e: Event, mark: Option<Mark>) {
+        match mark {
+            Some(m) => {
+                self.marks.insert(e, m);
+            }
+            None => {
+                self.marks.remove(&e);
+            }
+        }
+    }
+
+    /// The mark of the thread or channel created at `e`, if any.
+    pub(crate) fn mark(&self, e: Event) -> Option<&Mark> {
+        self.marks.get(&e)
     }
 
     /// Called just before we start an execution. When doing a forwards or backwards revisit,
@@ -1094,6 +1117,9 @@ impl ExecutionGraph {
         }
 
         // println!("After recv cut to view");
+
+        // Drop the marks of deleted events.
+        self.marks.retain(|e, _| v.contains(*e));
 
         // Erase all the threads not found in the vector clock.
         let threads = &mut self.threads;

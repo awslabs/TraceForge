@@ -13,9 +13,21 @@ where
     (Sender::new(tx), Receiver::new(rx))
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Sender<T> {
     sender: crate::channel::Sender<T>,
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for Sender<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Inside the pretty printer: only the channel end, e.g. `Receiver(c2.2)`.
+        if crate::trace_print::names::active() {
+            return std::fmt::Debug::fmt(&self.sender, f);
+        }
+        f.debug_struct("Sender")
+            .field("sender", &self.sender)
+            .finish()
+    }
 }
 
 unsafe impl<T: Send> Send for Sender<T> {}
@@ -43,9 +55,21 @@ impl<T: Message + 'static> Sender<T> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Receiver<T> {
     receiver: crate::channel::Receiver<T>,
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for Receiver<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Inside the pretty printer: only the channel end, e.g. `Receiver(c2.2)`.
+        if crate::trace_print::names::active() {
+            return std::fmt::Debug::fmt(&self.receiver, f);
+        }
+        f.debug_struct("Receiver")
+            .field("receiver", &self.receiver)
+            .finish()
+    }
 }
 
 unsafe impl<T: Send> Send for Receiver<T> {}
@@ -108,9 +132,21 @@ where
     (UnboundedSender::new(tx), UnboundedReceiver::new(rx))
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct UnboundedSender<T> {
     sender: crate::channel::Sender<T>,
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for UnboundedSender<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Inside the pretty printer: only the channel end, e.g. `Receiver(c2.2)`.
+        if crate::trace_print::names::active() {
+            return std::fmt::Debug::fmt(&self.sender, f);
+        }
+        f.debug_struct("UnboundedSender")
+            .field("sender", &self.sender)
+            .finish()
+    }
 }
 
 unsafe impl<T: Send> Send for UnboundedSender<T> {}
@@ -136,9 +172,21 @@ impl<T: Message + 'static> UnboundedSender<T> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct UnboundedReceiver<T> {
     pub(crate) receiver: crate::channel::Receiver<T>,
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for UnboundedReceiver<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Inside the pretty printer: only the channel end, e.g. `Receiver(c2.2)`.
+        if crate::trace_print::names::active() {
+            return std::fmt::Debug::fmt(&self.receiver, f);
+        }
+        f.debug_struct("UnboundedReceiver")
+            .field("receiver", &self.receiver)
+            .finish()
+    }
 }
 unsafe impl<T: Send> Send for UnboundedReceiver<T> {}
 

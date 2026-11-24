@@ -9,6 +9,7 @@ use crate::{
     msg::Message,
     runtime::execution::ExecutionState,
     thread::ThreadId,
+    trace_print::ChannelMark,
     ConsType, Unique,
 };
 
@@ -31,6 +32,7 @@ pub(crate) fn cons_to_model(c: ConsType) -> CommunicationModel {
 pub struct Builder<T> {
     named_id: Option<Loc>,
     comm: Option<CommunicationModel>,
+    runtime: bool,
     _t: std::marker::PhantomData<T>,
 }
 
@@ -39,8 +41,15 @@ impl<T: Message + Clone + 'static> Builder<T> {
         Builder {
             named_id: None,
             comm: None,
+            runtime: false,
             _t: std::marker::PhantomData,
         }
+    }
+
+    /// Marks the channel as the runtime's own: the pretty printer hides it and its messages.
+    pub(crate) fn runtime(mut self) -> Self {
+        self.runtime = true;
+        self
     }
 
     pub fn with_name<I: Identifier>(mut self, id: I) -> Self {
@@ -64,7 +73,11 @@ impl<T: Message + Clone + 'static> Builder<T> {
                     .comm
                     .unwrap_or_else(|| cons_to_model(s.must.borrow().config.cons_type));
                 let channel = Unique::new(pos, comm);
-                (s.must.borrow_mut().handle_unique(channel), comm)
+                let mark = ChannelMark {
+                    type_name: std::any::type_name::<T>(),
+                    runtime: self.runtime,
+                };
+                (s.must.borrow_mut().handle_unique(channel, mark), comm)
             })
         };
         (Sender::new(inner.clone(), comm), Receiver::new(inner, comm))
@@ -77,11 +90,26 @@ impl<T: Message + Clone + 'static> Default for Builder<T> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Sender<T> {
     inner: Loc,
     comm: CommunicationModel,
     _t: std::marker::PhantomData<T>,
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for Sender<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Inside the pretty printer: `Sender(c2.2)`.
+        if let Some(name) = crate::trace_print::names::channel_name(&self.inner) {
+            return write!(f, "Sender({})", name);
+        }
+        // Elsewhere: the same text as `derive(Debug)`.
+        f.debug_struct("Sender")
+            .field("inner", &self.inner)
+            .field("comm", &self.comm)
+            .field("_t", &self._t)
+            .finish()
+    }
 }
 
 unsafe impl<T: Send> Send for Sender<T> {}
@@ -95,6 +123,11 @@ impl<T: Message + 'static> Sender<T> {
             comm,
             _t: std::marker::PhantomData,
         }
+    }
+
+    /// The channel this sender sends to.
+    pub(crate) fn loc(&self) -> &Loc {
+        &self.inner
     }
 
     pub fn send_tagged_msg(&self, tag: u32, v: T) {
@@ -124,11 +157,26 @@ impl<T: Message + 'static> Sender<T> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Receiver<T> {
     pub(crate) inner: Loc,
     pub(crate) comm: CommunicationModel,
     _t: std::marker::PhantomData<T>,
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for Receiver<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Inside the pretty printer: `Receiver(c2.2)`.
+        if let Some(name) = crate::trace_print::names::channel_name(&self.inner) {
+            return write!(f, "Receiver({})", name);
+        }
+        // Elsewhere: the same text as `derive(Debug)`.
+        f.debug_struct("Receiver")
+            .field("inner", &self.inner)
+            .field("comm", &self.comm)
+            .field("_t", &self._t)
+            .finish()
+    }
 }
 
 unsafe impl<T: Send> Send for Receiver<T> {}

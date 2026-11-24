@@ -32,6 +32,7 @@ pub use testmode::{parallel_test, test};
 #[cfg(feature = "symbolic")]
 pub mod symbolic;
 pub mod thread;
+mod trace_print;
 mod vector_clock;
 
 pub use crate::msg::Val;
@@ -799,7 +800,7 @@ where
 {
     ExecutionState::with(|s| s.must.borrow().validate_monitor_spawn(&s.curr_pos()));
 
-    let jh = spawn_without_switch(monitor_function, Some("traceforge_runtime::monitor".to_string()), true, None, None);
+    let jh = spawn_without_switch(monitor_function, Some("traceforge_runtime::monitor".to_string()), true, None, None, None);
 
     // Register the monitor before calling switch(). You need to register it before
     // calling switch() because during replay, the replay execute the monitor first, find the monitor to
@@ -1776,7 +1777,7 @@ where
     F: Send + 'static,
     T: Message + 'static,
 {
-    let jh = crate::thread::spawn_without_switch(f, None, false, None, Some(tid));
+    let jh = crate::thread::spawn_without_switch(f, None, false, None, Some(tid), None);
     switch();
     jh
 }

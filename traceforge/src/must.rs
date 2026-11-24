@@ -28,6 +28,7 @@ use std::time::Instant;
 
 use crate::msg::Message;
 use crate::thread::{main_thread_id, ThreadId};
+use crate::trace_print::{ChannelMark, Mark, ThreadKind};
 
 #[cfg(feature = "symbolic")]
 use crate::symbolic::SymbolicSolver;
@@ -696,7 +697,11 @@ impl Must {
         pos: Event,
         name: Option<String>,
         is_daemon: bool,
+        kind: Option<ThreadKind>,
     ) {
+        // Mark for the pretty printer; also set on replay, so every execution rebuilds it.
+        self.current.graph.set_mark(pos, kind.map(Mark::Thread));
+
         let parent_tclab: TCreate = self.current.graph.get_thread_tclab(pos.thread);
         let mut origination_vec = parent_tclab.origination_vec();
         origination_vec.push(pos.index);
@@ -779,8 +784,12 @@ impl Must {
         self.add_to_graph(LabelEnum::End(elab));
     }
 
-    pub(crate) fn handle_unique(&mut self, nclab: Unique) -> Loc {
+    pub(crate) fn handle_unique(&mut self, nclab: Unique, mark: ChannelMark) -> Loc {
         let chan = nclab.get_loc();
+        // Mark for the pretty printer; also set on replay, so every execution rebuilds it.
+        self.current
+            .graph
+            .set_mark(nclab.pos(), Some(Mark::Channel(mark)));
         if self.is_replay(nclab.pos()) {
             info!("| Replay Mode for {}", nclab);
             let lab = LabelEnum::Unique(nclab);

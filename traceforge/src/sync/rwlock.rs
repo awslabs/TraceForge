@@ -10,6 +10,8 @@ use std::sync::Arc;
 use crate::channel::Sender;
 use crate::sync::TryLockError;
 use crate::thread::ThreadId;
+use crate::trace_print::{LockInfo, LockKind, LockMsg, LockOp, ThreadKind};
+use crate::Val;
 
 const MAX_READERS: usize = usize::MAX >> 3;
 
@@ -102,6 +104,10 @@ where
 
         let backing_tid = crate::thread::Builder::new()
             .name("traceforge_runtime::rwlock".into())
+            .kind(ThreadKind::Lock(LockInfo {
+                kind: LockKind::RwLock,
+                decode,
+            }))
             .spawn_daemon(move || synchronizer.run())
             .unwrap()
             .thread()
@@ -360,9 +366,29 @@ fn request(
     tag: u32,
     make: fn(ThreadId, Sender<Response>) -> Request,
 ) -> Response {
-    let (tx, rx) = crate::channel::Builder::<Response>::new().build();
+    let (tx, rx) = crate::channel::Builder::<Response>::new().runtime().build();
     crate::send_tagged_msg(backing_tid, tag, make(crate::thread::current().id(), tx));
     rx.recv_msg_block()
+}
+
+/// Reads a message of the rwlock protocol for the pretty printer.
+fn decode(v: &Val) -> Option<LockMsg> {
+    if let Some(req) = v.as_any_ref().downcast_ref::<Request>() {
+        let (op, tx) = match req {
+            Request::AcquireRead(_, tx) => (LockOp::ReadLock, tx),
+            Request::AcquireWrite(_, tx) => (LockOp::WriteLock, tx),
+            Request::ReleaseRead(_, tx) => (LockOp::ReadUnlock, tx),
+            Request::ReleaseWrite(_, tx) => (LockOp::WriteUnlock, tx),
+        };
+        return Some(LockMsg::Request {
+            op,
+            reply: Some(tx.loc().clone()),
+        });
+    }
+    if v.as_any_ref().downcast_ref::<Response>().is_some() {
+        return Some(LockMsg::Granted);
+    }
+    None
 }
 
 struct MustRwLock {
