@@ -318,7 +318,7 @@ impl ConfigBuilder {
             keep_per_execution_coverage: false,
 	        predetermined_choices: HashMap::new(),
             predetermined_global_choices: HashMap::new(),
-            pretty_graph_printing: false,
+            pretty_graph_printing: true,
             callbacks: Arc::new(Mutex::new(Vec::new())),
             #[cfg(feature = "symbolic")]
             symbolic: false,
@@ -621,9 +621,11 @@ impl ConfigBuilder {
         self
     }
 
-    /// Prints execution graphs in a readable form: the runtime's own threads and messages are
-    /// hidden, and an access to an atomic, mutex or rwlock is one line. A print about a failure
-    /// starts with what failed and ends with the events as one interleaving.
+    /// Prints execution graphs in a readable form (the default): the runtime's own threads and
+    /// messages are hidden, and an access to an atomic, mutex or rwlock is one line. A print
+    /// about a failure starts with what failed and ends with the events as one interleaving.
+    ///
+    /// `false` prints the full graph instead, as earlier versions did.
     pub fn with_pretty_graph_printing(mut self, pretty: bool) -> Self {
         self.0.pretty_graph_printing = pretty;
         self

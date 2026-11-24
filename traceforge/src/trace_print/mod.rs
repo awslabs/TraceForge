@@ -1,5 +1,5 @@
-//! The readable trace printer, used when the configuration sets
-//! `with_pretty_graph_printing(true)`.
+//! The readable trace printer: the default, unless the configuration sets
+//! `with_pretty_graph_printing(false)`.
 //!
 //! The analysis builds the list of visible events from the graph and the marks the libraries
 //! left in it (see [`marks`]). The renderer prints that list twice: per thread, and, when the

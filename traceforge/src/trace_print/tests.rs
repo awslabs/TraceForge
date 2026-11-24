@@ -214,10 +214,7 @@ pub(super) fn structural_problems(a: &Analysis, order: Option<&[usize]>) -> Vec<
 // Helpers
 
 fn config() -> Config {
-    Config::builder()
-        .with_pretty_graph_printing(true)
-        .with_seed(1)
-        .build()
+    Config::builder().with_seed(1).build()
 }
 
 /// Runs a program that fails, and returns the text printed for the failure.
@@ -346,11 +343,7 @@ fn golden_messages_not_a_failure() {
 }
 
 fn config_verbose() -> Config {
-    Config::builder()
-        .with_pretty_graph_printing(true)
-        .with_seed(1)
-        .with_verbose(1)
-        .build()
+    Config::builder().with_seed(1).with_verbose(1).build()
 }
 
 /// `sync::mpsc` between tasks, with awaited receives, a `select!` and an abort.
@@ -512,6 +505,71 @@ fn golden_panic() {
 }
 
 // ------------------------------------------------------------------------------------------
+// Default and verbose output
+
+/// With `with_verbose(1)` or `(2)`, the executions explored before the failure are printed
+/// without a VIOLATION block and without an interleaving; only the failure has them.
+#[test]
+fn interleaving_only_for_the_violation() {
+    let mut explored_prints = Vec::new();
+    for verbose in [1, 2] {
+        take();
+        let config = Config::builder().with_seed(1).with_verbose(verbose).build();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            crate::verify(config, || {
+                let waiter = thread::Builder::new()
+                    .name("waiter".into())
+                    .spawn(|| {
+                        let _: u32 = recv_msg_block();
+                    })
+                    .unwrap();
+                // Explored in this order: not a (the waiter blocks: two blocked executions),
+                // a and b (complete), a and not b (the failure).
+                let a = crate::nondet();
+                if a {
+                    send_msg(waiter.thread().id(), 1u32);
+                }
+                let b = crate::nondet();
+                crate::assert(!a || b);
+            });
+        }));
+        assert!(result.is_err(), "the program was expected to fail");
+        let prints = take();
+        let (failures, explored): (Vec<Captured>, Vec<Captured>) = prints
+            .into_iter()
+            .partition(|c| c.text.starts_with("VIOLATION"));
+        assert_eq!(failures.len(), 1, "verbose {}", verbose);
+        assert!(
+            failures[0].text.contains("one interleaving"),
+            "{}",
+            failures[0].text
+        );
+        for c in &explored {
+            assert!(!c.text.contains("VIOLATION"), "{}", c.text);
+            assert!(!c.text.contains("interleaving"), "{}", c.text);
+        }
+        explored_prints.push(explored.len());
+    }
+    // Level 1 prints the complete execution, level 2 also the two blocked ones.
+    assert_eq!(explored_prints, vec![1, 3]);
+}
+
+/// `with_pretty_graph_printing(false)` prints the full graph: the pretty printer is not used.
+#[test]
+fn full_graph_on_request() {
+    take();
+    let config = Config::builder()
+        .with_seed(1)
+        .with_verbose(1)
+        .with_pretty_graph_printing(false)
+        .build();
+    crate::verify(config, || {
+        thread::spawn(|| ()).join().unwrap();
+    });
+    assert!(take().is_empty(), "the pretty printer was used");
+}
+
+// ------------------------------------------------------------------------------------------
 // Partitioned parallel exploration
 //
 // The exploration runs on rayon threads, and graphs move between rayon tasks. Which worker finds
@@ -525,7 +583,6 @@ fn partitioned_config() -> crate::ConfigBuilder {
         .with_warmup(2)
         .with_iterations_until_split(1)
         .with_state_batch_size(1)
-        .with_pretty_graph_printing(true)
         .with_seed(1)
 }
 
