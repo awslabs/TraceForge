@@ -7,7 +7,9 @@ use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
+use crate::channel::Sender;
 use crate::sync::TryLockError;
+use crate::thread::ThreadId;
 
 const MAX_READERS: usize = usize::MAX >> 3;
 
@@ -112,13 +114,7 @@ where
     }
 
     pub async fn read(&self) -> RwLockReadGuard<'_, T> {
-        crate::send_tagged_msg(
-            self.backing_tid,
-            ACQUIRE_READ_TAG,
-            Request::AcquireRead(crate::thread::current().id()),
-        );
-        let backing_tid = self.backing_tid;
-        let resp = crate::recv_tagged_msg_block(move |tid, _| tid == backing_tid);
+        let resp = request(self.backing_tid, ACQUIRE_READ_TAG, Request::AcquireRead);
         match resp {
             Response::AcquireRead => RwLockReadGuard {
                 lock: self,
@@ -156,13 +152,7 @@ where
     }
 
     pub async fn write(&self) -> RwLockWriteGuard<'_, T> {
-        crate::send_tagged_msg(
-            self.backing_tid,
-            ACQUIRE_WRITE_TAG,
-            Request::AcquireWrite(crate::thread::current().id()),
-        );
-        let backing_tid = self.backing_tid;
-        let resp = crate::recv_tagged_msg_block(move |tid, _| tid == backing_tid);
+        let resp = request(self.backing_tid, ACQUIRE_WRITE_TAG, Request::AcquireWrite);
         match resp {
             Response::AcquireWrite => RwLockWriteGuard {
                 lock: self,
@@ -178,13 +168,7 @@ where
 
     pub async fn write_owned(self: Arc<Self>) -> OwnedRwLockWriteGuard<T> {
         // TODO: Do we need ManuallyDrop for the lock?
-        crate::send_tagged_msg(
-            self.backing_tid,
-            ACQUIRE_WRITE_TAG,
-            Request::AcquireWrite(crate::thread::current().id()),
-        );
-        let backing_tid = self.backing_tid;
-        let resp = crate::recv_tagged_msg_block(move |tid, _| tid == backing_tid);
+        let resp = request(self.backing_tid, ACQUIRE_WRITE_TAG, Request::AcquireWrite);
         match resp {
             Response::AcquireWrite => OwnedRwLockWriteGuard {
                 data: self.data.get(),
@@ -228,26 +212,14 @@ impl<T: ?Sized + fmt::Debug> fmt::Debug for RwLockWriteGuard<'_, T> {
 impl<T: ?Sized> Drop for RwLockReadGuard<'_, T> {
     fn drop(&mut self) {
         if std::thread::panicking() { return; }
-        let tid = self.lock.backing_tid;
-        crate::send_tagged_msg(
-            tid,
-            RELEASE_READ_TAG,
-            Request::ReleaseRead(crate::thread::current().id()),
-        );
-        let _: Response = crate::recv_tagged_msg_block(move |t, _| t == tid);
+        request(self.lock.backing_tid, RELEASE_READ_TAG, Request::ReleaseRead);
     }
 }
 
 impl<T: ?Sized> Drop for RwLockWriteGuard<'_, T> {
     fn drop(&mut self) {
         if std::thread::panicking() { return; }
-        let tid = self.lock.backing_tid;
-        crate::send_tagged_msg(
-            tid,
-            RELEASE_WRITE_TAG,
-            Request::ReleaseWrite(crate::thread::current().id()),
-        );
-        let _: Response = crate::recv_tagged_msg_block(move |t, _| t == tid);
+        request(self.lock.backing_tid, RELEASE_WRITE_TAG, Request::ReleaseWrite);
     }
 }
 
@@ -319,13 +291,7 @@ where
 impl<T: ?Sized, U: ?Sized> Drop for OwnedRwLockReadGuard<T, U> {
     fn drop(&mut self) {
         if std::thread::panicking() { return; }
-        let tid = self.lock.backing_tid;
-        crate::send_tagged_msg(
-            tid,
-            RELEASE_READ_TAG,
-            Request::ReleaseWrite(crate::thread::current().id()),
-        );
-        let _: Response = crate::recv_tagged_msg_block(move |t, _| t == tid);
+        request(self.lock.backing_tid, RELEASE_READ_TAG, Request::ReleaseRead);
         //TODO: Do we need ManuallyDrop?
         // unsafe { ManuallyDrop::drop(&mut self.lock) };
     }
@@ -357,13 +323,7 @@ where
 impl<T: ?Sized, U: ?Sized> Drop for OwnedRwLockWriteGuard<T, U> {
     fn drop(&mut self) {
         if std::thread::panicking() { return; }
-        let tid = self.lock.backing_tid;
-        crate::send_tagged_msg(
-            tid,
-            RELEASE_WRITE_TAG,
-            Request::ReleaseWrite(crate::thread::current().id()),
-        );
-        let _: Response = crate::recv_tagged_msg_block(move |t, _| t == tid);
+        request(self.lock.backing_tid, RELEASE_WRITE_TAG, Request::ReleaseWrite);
         //TODO: Do we need ManuallyDrop?
         // unsafe { ManuallyDrop::drop(&mut self.lock) };
     }
@@ -376,12 +336,13 @@ const ACQUIRE_WRITE_TAG: u32 = 2;
 const RELEASE_READ_TAG: u32 = 3;
 const RELEASE_WRITE_TAG: u32 = 4;
 
+/// A request to the lock's thread: the requesting thread, and the channel for the answer.
 #[derive(Debug, Clone, PartialEq)]
 enum Request {
-    AcquireRead(crate::thread::ThreadId),
-    AcquireWrite(crate::thread::ThreadId),
-    ReleaseRead(crate::thread::ThreadId),
-    ReleaseWrite(crate::thread::ThreadId),
+    AcquireRead(ThreadId, Sender<Response>),
+    AcquireWrite(ThreadId, Sender<Response>),
+    ReleaseRead(ThreadId, Sender<Response>),
+    ReleaseWrite(ThreadId, Sender<Response>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -390,6 +351,18 @@ enum Response {
     AcquireWrite,
     ReleaseRead,
     ReleaseWrite,
+}
+
+/// Sends a request to the lock's thread and waits for the answer on a fresh channel, as
+/// `Mutex` does.
+fn request(
+    backing_tid: ThreadId,
+    tag: u32,
+    make: fn(ThreadId, Sender<Response>) -> Request,
+) -> Response {
+    let (tx, rx) = crate::channel::Builder::<Response>::new().build();
+    crate::send_tagged_msg(backing_tid, tag, make(crate::thread::current().id(), tx));
+    rx.recv_msg_block()
 }
 
 struct MustRwLock {
@@ -413,8 +386,8 @@ impl MustRwLock {
             });
 
             match req {
-                Request::AcquireWrite(locking_tid) => {
-                    crate::send_msg(locking_tid, Response::AcquireWrite);
+                Request::AcquireWrite(locking_tid, tx) => {
+                    tx.send_msg(Response::AcquireWrite);
 
                     // This case is easy--the only kind of request we can accept now is to unlock the request
                     // from the correct thread.
@@ -422,23 +395,23 @@ impl MustRwLock {
                         tid == locking_tid && tag == Some(RELEASE_WRITE_TAG)
                     });
                     match req {
-                        Request::ReleaseWrite(tid) => {
+                        Request::ReleaseWrite(tid, tx) => {
                             assert!(locking_tid == tid);
-                            crate::send_msg(tid, Response::ReleaseWrite);
+                            tx.send_msg(Response::ReleaseWrite);
                         }
                         _ => unreachable!(),
                     }
                 }
-                Request::AcquireRead(tid) => {
-                    self.reader_lock_loop(tid);
+                Request::AcquireRead(tid, tx) => {
+                    self.reader_lock_loop(tid, tx);
                 }
                 m => panic!("Logic error; unexpected message {:?}", m),
             }
         }
     }
 
-    fn reader_lock_loop(&mut self, tid: crate::thread::ThreadId) {
-        crate::send_msg(tid, Response::AcquireRead);
+    fn reader_lock_loop(&mut self, tid: ThreadId, tx: Sender<Response>) {
+        tx.send_msg(Response::AcquireRead);
 
         let mut reader_tids = HashSet::new();
         reader_tids.insert(tid);
@@ -462,15 +435,15 @@ impl MustRwLock {
                 })
             };
             match req {
-                Request::AcquireRead(thread_id) => {
+                Request::AcquireRead(thread_id, tx) => {
                     reader_tids.insert(thread_id);
                     self.current_readers += 1;
-                    crate::send_msg(thread_id, Response::AcquireRead);
+                    tx.send_msg(Response::AcquireRead);
                 }
-                Request::ReleaseRead(thread_id) => {
+                Request::ReleaseRead(thread_id, tx) => {
                     reader_tids.remove(&thread_id);
                     self.current_readers -= 1;
-                    crate::send_msg(thread_id, Response::ReleaseRead);
+                    tx.send_msg(Response::ReleaseRead);
                 }
                 m => panic!("Logic error; unexpected message {:?}", m),
             }
