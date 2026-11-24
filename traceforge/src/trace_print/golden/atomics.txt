@@ -1,0 +1,48 @@
+VIOLATION  an assertion failed
+  in main, at (main, 16)
+  seed 1
+
+threads
+  main    t0   atomics: a1
+  writer  t2
+
+hidden  1 runtime thread (12 events), and 12 runtime events in the threads above
+
+how to read a line
+  index  NEW ATOMIC                       a5     of u64, initially 0
+  index  STORE                            a5.1   value 10  the 1st access to a5, counting the loads, stores and compare-exchanges of all threads
+  index  LOAD                             a5.3   value 20, stored at a5.2 (thread, index)
+  index  CAS                              a5.4   expected 20, new 30: succeeded, found 20, stored at a5.2 (thread, index)
+  indexes are those of the full trace: a gap means hidden runtime events
+
+==============================================================================================================
+
+thread "main"  (t0)
+    1  NEW ATOMIC  a1    of u64, initially 5
+    2  SPAWN             writer
+    4  LOAD        a1.1  value 5, the initial value
+    7  STORE       a1.2  value 2
+    9  JOIN              writer
+   11  CAS         a1.4  expected 2, new 3: failed, found 1, stored at a1.3 (writer, 2)
+   14  CAS         a1.5  expected 7, new 8: failed, found 1, stored at a1.3 (writer, 2)
+   16  BLOCKED           by a failed assertion
+
+thread "writer"  (t2)
+    2  STORE       a1.3  value 1
+    4  END
+
+==============================================================================================================
+
+the same execution as one interleaving  (one of the orders that this behavior allows; #n is a step of this list)
+
+   #  thread  event
+   1  main    NEW ATOMIC  a1    of u64, initially 5
+   2          SPAWN             writer
+   3          LOAD        a1.1  value 5, the initial value
+   4          STORE       a1.2  value 2
+   5  writer  STORE       a1.3  value 1
+   6          END
+   7  main    JOIN              writer
+   8          CAS         a1.4  expected 2, new 3: failed, found 1, stored at a1.3 #5
+   9          CAS         a1.5  expected 7, new 8: failed, found 1, stored at a1.3 #5
+  10          BLOCKED           by a failed assertion

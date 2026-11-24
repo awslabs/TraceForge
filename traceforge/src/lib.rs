@@ -621,7 +621,9 @@ impl ConfigBuilder {
         self
     }
 
-    /// Enables pretty printing of execution graphs in all output
+    /// Prints execution graphs in a readable form: the runtime's own threads and messages are
+    /// hidden, and an access to an atomic, mutex or rwlock is one line. A print about a failure
+    /// starts with what failed and ends with the events as one interleaving.
     pub fn with_pretty_graph_printing(mut self, pretty: bool) -> Self {
         self.0.pretty_graph_printing = pretty;
         self
@@ -1758,7 +1760,8 @@ pub fn assert(cond: bool) {
                 // as above, we report the assertion violation only if the execution graph is consistent
                 if must.is_consistent() {
                     info!("Error Detected!");
-                    println!("{}", must.print_graph(None));
+                    let failure = crate::trace_print::Failure::Assertion { pos };
+                    println!("{}", must.print_failure_graph(None, failure));
                     // The graph is completely generated, now build the linearization
                     must.store_replay_information(Some(pos));
                     std::io::stderr().flush().unwrap();

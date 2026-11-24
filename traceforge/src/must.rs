@@ -28,7 +28,7 @@ use std::time::Instant;
 
 use crate::msg::Message;
 use crate::thread::{main_thread_id, ThreadId};
-use crate::trace_print::{ChannelMark, Mark, ThreadKind};
+use crate::trace_print::{ChannelMark, Failure, FailureReport, Mark, ThreadKind};
 
 #[cfg(feature = "symbolic")]
 use crate::symbolic::SymbolicSolver;
@@ -149,6 +149,8 @@ pub(crate) struct Must {
     pub(crate) global_named_choices: HashMap<String, bool>,
     // Maximum number of events across all complete (non-blocked) execution graphs
     max_graph_events: usize,
+    // Set once the graph of the current failure has been printed.
+    failure_printed: std::cell::Cell<bool>,
 }
 
 impl Must {
@@ -186,6 +188,7 @@ impl Must {
             symbolic_solver: SymbolicSolver::new(),
             global_named_choices: HashMap::new(),
             max_graph_events: 0,
+            failure_printed: std::cell::Cell::new(false),
         }
     }
 
@@ -342,6 +345,7 @@ impl Must {
         self.choice_occurrence_counters.clear();
         self.global_named_choices.clear();
         self.max_graph_events = 0;
+        self.failure_printed.set(false);
         // Reset telemetry so stats() starts from zero for this task.
         self.telemetry = Telemetry::new(self.config.keep_per_execution_coverage);
         let _ = self.telemetry.register_counter(&EXECS.to_owned());
@@ -1404,7 +1408,11 @@ impl Must {
             if let Err(msg) = res {
                 // Store the replay information first.
                 must.borrow_mut().store_replay_information(None);
-                println!("{}", must.borrow_mut().print_graph(None));
+                let failure = Failure::Monitor {
+                    message: msg.clone(),
+                    condition: condition.clone(),
+                };
+                println!("{}", must.borrow_mut().print_failure_graph(None, failure));
                 std::io::stderr().flush().unwrap();
                 panic!(
                     "\u{1b}[1;31mA monitor returned the message: {}\u{1b}[0m",
@@ -2266,9 +2274,39 @@ impl Must {
         }
     }
 
+    /// The text of the graph, for a print that is not about a failure.
     pub(crate) fn print_graph(&self, pos: Option<Event>) -> String {
+        self.print_graph_impl(pos, None)
+    }
+
+    /// Like `print_graph`, for a failing execution: the pretty printer adds what failed and
+    /// the interleaving, which it prints for failures only.
+    pub(crate) fn print_failure_graph(&self, pos: Option<Event>, failure: Failure) -> String {
+        self.failure_printed.set(true);
+        self.print_graph_impl(pos, Some(failure))
+    }
+
+    /// The pretty text of the graph for a panic after `pos`; `None` without pretty printing or
+    /// if it was already printed. Writes no dot or trace file: none was ever written on a panic.
+    pub(crate) fn print_panic_graph(&self, pos: Option<Event>, message: String) -> Option<String> {
+        if !self.config.pretty_graph_printing || self.failure_printed.get() {
+            return None;
+        }
+        self.failure_printed.set(true);
+        let report = FailureReport {
+            failure: Failure::Panic { pos, message },
+            seed: self.config.seed,
+        };
+        Some(crate::trace_print::print(&self.current.graph, Some(&report)))
+    }
+
+    fn print_graph_impl(&self, pos: Option<Event>, failure: Option<Failure>) -> String {
         let out = if self.config.pretty_graph_printing {
-            format!("{}", self.current.graph.pretty_display())
+            let report = failure.map(|failure| FailureReport {
+                failure,
+                seed: self.config.seed,
+            });
+            crate::trace_print::print(&self.current.graph, report.as_ref())
         } else {
             format!("{}", self.current.graph)
         };
