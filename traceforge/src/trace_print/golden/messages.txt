@@ -1,0 +1,55 @@
+VIOLATION  an assertion failed
+  in main, at (main, 6)
+  seed 1
+
+threads
+  main  t0
+  pong  t1
+  ping  t2
+
+hidden  0 runtime threads (0 events), and 3 runtime events in the threads above
+
+how to read a line
+  index  SEND         -> (thread, index)  c3.8   value     the event that receives it; the channel, if the message goes through one
+  index  RECV         <- (thread, index)  c3.8   value     the event that sent it
+  indexes are those of the full trace: a gap means hidden runtime events
+
+==============================================================================================================
+
+thread "main"  (t0)
+    1  SPAWN                  pong
+    2  SPAWN                  ping
+    3  RECV     <- (ping, 3)  2
+    4  JOIN                   ping
+    5  JOIN                   pong
+    6  BLOCKED                by a failed assertion
+
+thread "pong"  (t1)
+    1  RECV     <- (ping, 1)  (ping, 1)
+    2  SEND     -> (ping, 2)  2
+    3  END
+
+thread "ping"  (t2)
+    1  SEND     -> (pong, 1)  (ping, 1)
+    2  RECV     <- (pong, 2)  2
+    3  SEND     -> (main, 3)  2
+    4  END
+
+==============================================================================================================
+
+the same execution as one interleaving  (one of the orders that this behavior allows; #n is a step of this list)
+
+   #  thread  event
+   1  main    SPAWN            pong
+   2          SPAWN            ping
+   3  ping    SEND     -> #4   (ping, 1)
+   4  pong    RECV     <- #3   (ping, 1)
+   5          SEND     -> #7   2
+   6          END
+   7  ping    RECV     <- #5   2
+   8          SEND     -> #10  2
+   9          END
+  10  main    RECV     <- #8   2
+  11          JOIN             ping
+  12          JOIN             pong
+  13          BLOCKED          by a failed assertion

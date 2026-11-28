@@ -17,6 +17,7 @@ use crate::runtime::task::{TaskId};
 
 use crate::runtime::thread::{self, switch};
 use crate::thread::Thread;
+use crate::trace_print::ThreadKind;
 use crate::CommunicationModel::LocalOrder;
 use crate::TJoin;
 use std::error::Error;
@@ -38,8 +39,8 @@ impl std::task::Wake for Sender<WakeMsg> {
 }
 
 fn get_bidir_handles() -> (TwoWayCom, TwoWayCom) {
-    let (sender1, receiver1) = Builder::new().with_comm(LocalOrder).build();
-    let (sender2, receiver2) = Builder::new().with_comm(LocalOrder).build();
+    let (sender1, receiver1) = Builder::new().with_comm(LocalOrder).runtime().build();
+    let (sender2, receiver2) = Builder::new().with_comm(LocalOrder).runtime().build();
     // *flip* them
     (
         TwoWayCom {
@@ -75,7 +76,7 @@ where
 
     let task_id = ExecutionState::spawn_thread(
         move || {
-            let (sender, fut_recv) = Builder::<WakeMsg>::new().build();
+            let (sender, fut_recv) = Builder::<WakeMsg>::new().runtime().build();
             let fut_waker = Waker::from(std::sync::Arc::new(sender.clone()));
 
             // Poll once in advance:
@@ -167,6 +168,7 @@ where
     let (thread_id, name) = ExecutionState::with(|state| {
         let pos = state.next_pos();
         let tid = state.must.borrow().next_thread_id(&pos);
+        let named = name.is_some();
         let name = match name {
             None => format!("<future-{}>", tid.to_number()),
             Some(x) => x,
@@ -179,6 +181,7 @@ where
             pos,
             Some(name.clone()),
             is_daemon,
+            Some(ThreadKind::Task { named }),
         );
         (tid, Some(name))
     });
@@ -304,6 +307,7 @@ where
             pos,
             Some(name.clone()),
             true, /* async receives are daemon threads */
+            Some(ThreadKind::AsyncRecv),
         );
         (tid, Some(name))
     });
@@ -486,7 +490,7 @@ impl<T: Message + 'static> Future for JoinHandle<T> {
 /// Run a future to completion on the current thread.
 pub fn block_on<F: Future>(future: F) -> F::Output {
     let mut future = Box::pin(future);
-    let (sender, receiver) = Builder::<WakeMsg>::new().build();
+    let (sender, receiver) = Builder::<WakeMsg>::new().runtime().build();
     let waker = Waker::from(std::sync::Arc::new(sender.clone()));
     let cx = &mut Context::from_waker(&waker);
 

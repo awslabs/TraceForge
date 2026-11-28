@@ -1,0 +1,21 @@
+threads
+  main  t0
+  t1    t1
+
+hidden  0 runtime threads (0 events), and 2 runtime events in the threads above
+
+how to read a line
+  index  SEND         -> (thread, index)  c3.8   value     the event that receives it; the channel, if the message goes through one
+  index  RECV         <- (thread, index)  c3.8   value     the event that sent it
+  indexes are those of the full trace: a gap means hidden runtime events
+
+==============================================================================================================
+
+thread "main"  (t0)
+    1  SPAWN                t1
+    2  SEND   -> (t1, 1)    7
+    3  JOIN                 t1
+
+thread "t1"  (t1)
+    1  RECV   <- (main, 2)  7
+    2  END

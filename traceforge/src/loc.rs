@@ -62,6 +62,11 @@ impl RecvLoc {
         self.locs.as_ref().unwrap()
     }
 
+    /// Like `locs`, but `None` when the locations were lost in (de)serialization.
+    pub(crate) fn locs_opt(&self) -> Option<&Vec<Loc>> {
+        self.locs.as_ref()
+    }
+
     /// Returns whether the receive's tag matches the send's tag
     pub(crate) fn matches_tag(&self, send: &SendMsg) -> bool {
         let send_loc = send.send_loc();

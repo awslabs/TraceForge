@@ -1,0 +1,60 @@
+VIOLATION  an assertion failed
+  in main, at (main, 22)
+  seed 1
+
+threads
+  main  t0   tasks: consumer (t1), main/future-2 (t2)
+
+hidden  5 runtime threads (38 events), and 67 runtime events in the threads above
+
+how to read a line
+  index  SEND         -> (thread, index)  c3.8   value     the event that receives it; the channel, if the message goes through one
+  index  RECV         <- (thread, index)  c3.8   value     the event that sent it
+  index  NEW CHANNEL                      c3.8   of u64    c3.8 is the channel created by t3 at its index 8
+  indexes are those of the full trace: a gap means hidden runtime events
+
+==============================================================================================================
+
+thread "main"  (t0)
+    2  NEW CHANNEL                         c0.2  of u32
+    3  NEW CHANNEL                         c0.3  of u32
+    6  SPAWN                                     consumer
+    9  SPAWN                                     main/future-2
+   10  SEND         -> (consumer, 16)      c0.2  1
+   11  SEND         -> (consumer, 36)      c0.3  2
+   17  JOIN                                      consumer (task)
+   20  ABORT        -> (main/future-2, 8)
+   21  JOIN                                      main/future-2 (task)
+   22  BLOCKED                                   by a failed assertion
+
+thread "consumer"  (t1)
+   16  RECV         <- (main, 10)          c0.2  1
+   36  RECV         <- (main, 11)          c0.3  2
+   46  END
+
+thread "main/future-2"  (t2)
+    2  NEW CHANNEL                         c2.2  of u32
+    8  ABORTED      <- (main, 20)
+   12  END
+
+==============================================================================================================
+
+the same execution as one interleaving  (one of the orders that this behavior allows; #n is a step of this list)
+
+   #  thread         event
+   1  main           NEW CHANNEL          c0.2  of u32
+   2                 NEW CHANNEL          c0.3  of u32
+   3                 SPAWN                      consumer
+   4                 SPAWN                      main/future-2
+   5                 SEND         -> #7   c0.2  1
+   6                 SEND         -> #8   c0.3  2
+   7  consumer       RECV         <- #5   c0.2  1
+   8                 RECV         <- #6   c0.3  2
+   9  main/future-2  NEW CHANNEL          c2.2  of u32
+  10  consumer       END
+  11  main           JOIN                       consumer (task)
+  12                 ABORT        -> #13
+  13  main/future-2  ABORTED      <- #12
+  14                 END
+  15  main           JOIN                       main/future-2 (task)
+  16                 BLOCKED                    by a failed assertion

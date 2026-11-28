@@ -1,0 +1,49 @@
+VIOLATION  reported by a monitor, at the end of a blocked execution
+  the execution ended with Deadlock
+  seed 1
+
+threads
+  main    t0   rwlocks: r2
+  reader  t3
+  writer  t4
+
+hidden  2 runtime threads (10 events), and 15 runtime events in the threads above
+
+how to read a line
+  index  NEW RWLOCK                       r4
+  index  READ_LOCK                        r4.1             the 1st request served by r4, counting the locks and unlocks of all threads
+  indexes are those of the full trace: a gap means hidden runtime events
+
+==============================================================================================================
+
+thread "main"  (t0)
+    2  NEW RWLOCK   r2
+    5  READ_LOCK    r2.1
+    7  SPAWN              reader
+    8  JOIN               reader
+    9  SPAWN              writer
+   10  BLOCKED            on the join of writer
+
+thread "reader"  (t3)
+    3  READ_LOCK    r2.2
+    6  READ_UNLOCK  r2.3
+    8  END
+
+thread "writer"  (t4)
+    3  WRITE_LOCK   r2    blocked, read-held since r2.1 (main, 5)
+
+==============================================================================================================
+
+the same execution as one interleaving  (one of the orders that this behavior allows; #n is a step of this list)
+
+   #  thread  event
+   1  main    NEW RWLOCK   r2
+   2          READ_LOCK    r2.1
+   3          SPAWN              reader
+   4  reader  READ_LOCK    r2.2
+   5          READ_UNLOCK  r2.3
+   6          END
+   7  main    JOIN               reader
+   8          SPAWN              writer
+   9  writer  WRITE_LOCK   r2    blocked, read-held since r2.1 #2
+  10  main    BLOCKED            on the join of writer

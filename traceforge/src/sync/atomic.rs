@@ -2,6 +2,7 @@
 
 use crate::channel::*;
 use crate::thread::*;
+use crate::trace_print::{AtomicInfo, AtomicMsg, ThreadKind};
 use crate::*;
 use std::fmt::Debug;
 use std::sync::atomic::Ordering;
@@ -30,6 +31,35 @@ pub enum MsgResponse<T: Clone + Debug + PartialEq + std::marker::Send> {
     ReadResponse(T),
     WriteResponse,
     CASResponse(bool),
+}
+
+/// Reads a message of the atomic protocol for the pretty printer.
+fn decode<T: Clone + Debug + PartialEq + std::marker::Send + 'static>(
+    v: &Val,
+) -> Option<AtomicMsg> {
+    if let Some(req) = v.as_any_ref().downcast_ref::<MsgRequest<T>>() {
+        return Some(match req {
+            MsgRequest::Read(tx) => AtomicMsg::Load {
+                reply: tx.loc().clone(),
+            },
+            MsgRequest::Write(x, _) => AtomicMsg::Store {
+                value: Val::new(x.clone()),
+            },
+            MsgRequest::CAS(e, n, tx) => AtomicMsg::Cas {
+                expected: Val::new(e.clone()),
+                new: Val::new(n.clone()),
+                reply: tx.loc().clone(),
+            },
+        });
+    }
+    if let Some(resp) = v.as_any_ref().downcast_ref::<MsgResponse<T>>() {
+        return Some(match resp {
+            MsgResponse::ReadResponse(x) => AtomicMsg::Loaded(Val::new(x.clone())),
+            MsgResponse::WriteResponse => AtomicMsg::Stored,
+            MsgResponse::CASResponse(b) => AtomicMsg::CasResult(*b),
+        });
+    }
+    None
 }
 
 pub struct Synchronizer<T: Clone + Debug + PartialEq + std::marker::Send> {
@@ -71,10 +101,16 @@ unsafe impl<T: Clone + Debug + PartialEq + std::marker::Send + 'static> Sync for
 
 impl<T: Clone + Debug + PartialEq + std::marker::Send + 'static> AtomicRegister<T> {
     pub fn new(value: T) -> Self {
+        let kind = ThreadKind::Atomic(AtomicInfo {
+            type_name: std::any::type_name::<T>(),
+            initial: Val::new(value.clone()),
+            decode: decode::<T>,
+        });
         let mut tsync = Synchronizer::<T> { value };
 
         let tsync_handle = thread::Builder::new()
             .name("traceforge_runtime::atomic_register".to_string())
+            .kind(kind)
             .spawn_daemon(move || {
                 tsync.execute();
             })
@@ -90,7 +126,7 @@ impl<T: Clone + Debug + PartialEq + std::marker::Send + 'static> AtomicRegister<
         if order != Ordering::SeqCst {
             panic!("Load accesses to AtomicRegister are only implemented for SeqCst")
         }
-        let chan = channel::Builder::<MsgResponse<T>>::new().build();
+        let chan = channel::Builder::<MsgResponse<T>>::new().runtime().build();
         send_msg(*self.synchronizer, MsgRequest::Read(chan.0));
         match chan.1.recv_msg_block() {
             MsgResponse::ReadResponse(x) => x,
@@ -103,7 +139,7 @@ impl<T: Clone + Debug + PartialEq + std::marker::Send + 'static> AtomicRegister<
         if order != Ordering::SeqCst {
             panic!("Store accesses to AtomicRegister are only implemented for SeqCst")
         }
-        let chan = channel::Builder::<MsgResponse<T>>::new().build();
+        let chan = channel::Builder::<MsgResponse<T>>::new().runtime().build();
         send_msg(*self.synchronizer, MsgRequest::Write(new, chan.0));
         match chan.1.recv_msg_block() {
             MsgResponse::ReadResponse(_) => panic!("Error in the implementation of AtomicRegister"),
@@ -121,7 +157,7 @@ impl<T: Clone + Debug + PartialEq + std::marker::Send + 'static> AtomicRegister<
         _failure: Ordering,
     ) -> Result<T, T> {
         info!("This is an incomplete implementation. It only handles Sequential Consistency");
-        let chan = channel::Builder::<MsgResponse<T>>::new().build();
+        let chan = channel::Builder::<MsgResponse<T>>::new().runtime().build();
         send_msg(
             *self.synchronizer,
             MsgRequest::CAS(current.clone(), new.clone(), chan.0),

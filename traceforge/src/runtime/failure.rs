@@ -29,6 +29,12 @@ use crate::must::Must;
 use crate::runtime::execution::ExecutionState;
 
 pub(crate) fn persist_task_failure(message: String, pos: Option<Event>) -> String {
+    persist_failure(message, pos, None)
+}
+
+/// Like `persist_task_failure`. With `panic` (a thread's panic message), also prints the
+/// pretty graph when pretty printing is on.
+pub(crate) fn persist_failure(message: String, pos: Option<Event>, panic: Option<String>) -> String {
     // Disarm the panic hook so that we don't print the failure twice
     if let PanicHookState::Persisted(persisted_message) =
         PANIC_HOOK.with(|lock| lock.lock().unwrap().clone())
@@ -38,6 +44,9 @@ pub(crate) fn persist_task_failure(message: String, pos: Option<Event>) -> Strin
     if let Some(must) = Must::current() {
         if let Ok(mut must) = must.try_borrow_mut() {
             must.store_replay_information(pos);
+            if let Some(text) = panic.and_then(|p| must.print_panic_graph(pos, p)) {
+                println!("{}", text);
+            }
         } else {
             error!("Couldn't generate a counterexample because Must::current is borrowed");
         }
@@ -92,7 +101,17 @@ pub(crate) fn init_panic_hook() -> PanicHookGuard {
             // The hook is armed if this is the first time it's fired
             if let PanicHookState::Armed = state {
                 if let Some((name, pos)) = ExecutionState::failure_info() {
-                    persist_task_failure(name, Some(pos));
+                    let payload = panic_info.payload();
+                    let msg = payload
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "Box<dyn Any>".to_string());
+                    let panic = match panic_info.location() {
+                        Some(l) => format!("panicked at {}:{}:{}:\n{}", l.file(), l.line(), l.column(), msg),
+                        None => format!("panicked:\n{}", msg),
+                    };
+                    persist_failure(name, Some(pos), Some(panic));
                 } else {
                     persist_task_failure("A panic was detected".to_string(), None);
                 }

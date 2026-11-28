@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use crate::channel::{self, Sender};
 use crate::thread::{self, ThreadId};
-use crate::{recv_tagged_msg_block, send_tagged_msg};
+use crate::trace_print::{LockInfo, LockKind, LockMsg, LockOp, ThreadKind};
+use crate::{recv_tagged_msg_block, send_tagged_msg, Val};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum LockRequest {
@@ -22,6 +23,33 @@ pub enum MsgResponse {
     LockGranted,
     LockAlreadyHeld,
     Unlocked,
+}
+
+/// Reads a message of the mutex protocol for the pretty printer.
+fn decode(v: &Val) -> Option<LockMsg> {
+    if let Some(req) = v.as_any_ref().downcast_ref::<LockRequest>() {
+        return Some(match req {
+            LockRequest::Lock(_, tx) => LockMsg::Request {
+                op: LockOp::Lock,
+                reply: Some(tx.loc().clone()),
+            },
+            LockRequest::TryLock(_, tx) => LockMsg::Request {
+                op: LockOp::TryLock,
+                reply: Some(tx.loc().clone()),
+            },
+            LockRequest::Unlock(_) => LockMsg::Request {
+                op: LockOp::Unlock,
+                reply: None,
+            },
+        });
+    }
+    if let Some(resp) = v.as_any_ref().downcast_ref::<MsgResponse>() {
+        return Some(match resp {
+            MsgResponse::LockGranted | MsgResponse::Unlocked => LockMsg::Granted,
+            MsgResponse::LockAlreadyHeld => LockMsg::Refused,
+        });
+    }
+    None
 }
 
 const LOCK_TAG: u32 = 1;
@@ -161,6 +189,10 @@ impl<T: ?Sized> Mutex<T> {
 
         let tsync_handle = thread::Builder::new()
             .name("traceforge_runtime::mutex".to_string())
+            .kind(ThreadKind::Lock(LockInfo {
+                kind: LockKind::Mutex,
+                decode,
+            }))
             .spawn_daemon(move || {
                 tsync.execute();
             })
@@ -173,7 +205,7 @@ impl<T: ?Sized> Mutex<T> {
     }
 
     async fn acquire(&self) {
-        let chan = channel::Builder::<MsgResponse>::new().build();
+        let chan = channel::Builder::<MsgResponse>::new().runtime().build();
         send_tagged_msg(
             self.synchronizer,
             LOCK_TAG,
@@ -217,7 +249,7 @@ impl<T: ?Sized> Mutex<T> {
     }
 
     fn try_acquire(&self) -> Result<(), TryLockError> {
-        let chan = channel::Builder::<MsgResponse>::new().build();
+        let chan = channel::Builder::<MsgResponse>::new().runtime().build();
         send_tagged_msg(
             self.synchronizer,
             TRYLOCK_TAG,

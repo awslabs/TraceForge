@@ -1,6 +1,6 @@
 use crate::event::Event;
 use crate::must::Must;
-use crate::runtime::failure::{init_panic_hook, persist_task_failure};
+use crate::runtime::failure::{init_panic_hook, persist_failure, persist_task_failure};
 //experimental. Unfinished. use crate::runtime::storage::{StorageKey, StorageMap};
 use crate::runtime::task::{Task, TaskId, DEFAULT_INLINE_TASKS};
 use crate::runtime::thread::continuation::PooledContinuation;
@@ -162,7 +162,15 @@ impl Execution {
             // Task failed
             Err(e) => {
                 let (name, pos) = ExecutionState::failure_info().unwrap();
-                let message = persist_task_failure(name, Some(pos));
+                // Usually a no-op: the panic hook already reported the failure. Not if the hook was
+                // bypassed: the `generator` crate briefly replaces the global hook while it
+                // cancels a coroutine, possibly on another thread.
+                let panic = e
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .map(|m| format!("panicked:\n{}", m));
+                let message = persist_failure(name, Some(pos), panic);
                 // Try to inject the schedule into the panic payload if we can
                 let payload: Box<dyn Any + Send> = match e.downcast::<String>() {
                     Ok(panic_msg) => {

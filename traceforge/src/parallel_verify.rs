@@ -145,8 +145,10 @@ where
     println!("Max graph events: {}", total_stats.max_graph_events);
     println!("=============================================\n");
 
-    // Re-raise the first panic after cleanup so CI sees a non-zero exit code.
-    if let Some(payload) = first_panic.lock().unwrap().take() {
+    // Re-raise a panic after cleanup so CI sees a non-zero exit code: the first rayon task's,
+    // or else the root worker's (caught around the scope).
+    let task_panic = first_panic.lock().unwrap().take();
+    if let Some(payload) = task_panic.or(scope_result.err()) {
         std::panic::resume_unwind(payload);
     }
 

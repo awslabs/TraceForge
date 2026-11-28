@@ -32,6 +32,7 @@ pub use testmode::{parallel_test, test};
 #[cfg(feature = "symbolic")]
 pub mod symbolic;
 pub mod thread;
+mod trace_print;
 mod vector_clock;
 
 pub use crate::msg::Val;
@@ -317,7 +318,7 @@ impl ConfigBuilder {
             keep_per_execution_coverage: false,
 	        predetermined_choices: HashMap::new(),
             predetermined_global_choices: HashMap::new(),
-            pretty_graph_printing: false,
+            pretty_graph_printing: true,
             callbacks: Arc::new(Mutex::new(Vec::new())),
             #[cfg(feature = "symbolic")]
             symbolic: false,
@@ -620,7 +621,11 @@ impl ConfigBuilder {
         self
     }
 
-    /// Enables pretty printing of execution graphs in all output
+    /// Prints execution graphs in a readable form (the default): the runtime's own threads and
+    /// messages are hidden, and an access to an atomic, mutex or rwlock is one line. A print
+    /// about a failure starts with what failed and ends with the events as one interleaving.
+    ///
+    /// `false` prints the full graph instead, as earlier versions did.
     pub fn with_pretty_graph_printing(mut self, pretty: bool) -> Self {
         self.0.pretty_graph_printing = pretty;
         self
@@ -876,7 +881,7 @@ where
 {
     ExecutionState::with(|s| s.must.borrow().validate_monitor_spawn(&s.curr_pos()));
 
-    let jh = spawn_without_switch(monitor_function, Some("traceforge_runtime::monitor".to_string()), true, None, None);
+    let jh = spawn_without_switch(monitor_function, Some("traceforge_runtime::monitor".to_string()), true, None, None, None);
 
     // Register the monitor before calling switch(). You need to register it before
     // calling switch() because during replay, the replay execute the monitor first, find the monitor to
@@ -1834,7 +1839,8 @@ pub fn assert(cond: bool) {
                 // as above, we report the assertion violation only if the execution graph is consistent
                 if must.is_consistent() {
                     info!("Error Detected!");
-                    println!("{}", must.print_graph(None));
+                    let failure = crate::trace_print::Failure::Assertion { pos };
+                    println!("{}", must.print_failure_graph(None, failure));
                     // The graph is completely generated, now build the linearization
                     must.store_replay_information(Some(pos));
                     std::io::stderr().flush().unwrap();
@@ -1853,7 +1859,7 @@ where
     F: Send + 'static,
     T: Message + 'static,
 {
-    let jh = crate::thread::spawn_without_switch(f, None, false, None, Some(tid));
+    let jh = crate::thread::spawn_without_switch(f, None, false, None, Some(tid), None);
     switch();
     jh
 }

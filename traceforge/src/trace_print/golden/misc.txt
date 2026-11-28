@@ -1,0 +1,40 @@
+VIOLATION  an assertion failed
+  in main, at (main, 6)
+  seed 1
+
+threads
+  main  t0
+  sink  t1
+
+hidden  0 runtime threads (0 events), and 2 runtime events in the threads above
+
+how to read a line
+  index  SEND         -> (thread, index)  c3.8   value     the event that receives it; the channel, if the message goes through one
+  index  RECV         <- (thread, index)  c3.8   value     the event that sent it
+  indexes are those of the full trace: a gap means hidden runtime events
+
+==============================================================================================================
+
+thread "main"  (t0)
+    1  SPAWN                     sink
+    2  SEND     -> not received  5
+    3  RECV     timeout
+    4                            NONDET false
+    5  JOIN                      sink
+    6  BLOCKED                   by a failed assertion
+
+thread "sink"  (t1)
+    1  END
+
+==============================================================================================================
+
+the same execution as one interleaving  (one of the orders that this behavior allows; #n is a step of this list)
+
+   #  thread  event
+   1  main    SPAWN                     sink
+   2          SEND     -> not received  5
+   3          RECV     timeout
+   4                                    NONDET false
+   5  sink    END
+   6  main    JOIN                      sink
+   7          BLOCKED                   by a failed assertion

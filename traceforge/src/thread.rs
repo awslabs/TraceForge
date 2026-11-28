@@ -14,6 +14,7 @@ use crate::must::Must;
 use crate::runtime::execution::ExecutionState;
 use crate::runtime::task::TaskId;
 use crate::runtime::thread::{self, switch};
+use crate::trace_print::ThreadKind;
 use crate::Val;
 
 /// A unique identifier for a running thread
@@ -33,10 +34,23 @@ use crate::Val;
 // You might want to add PartialOrd because you want to put ThreadId's as a key in a BTreeMap.
 // Instead, use a HashMap. Even though HashMap iterations are randomly ordered, this should be fine
 // for most applications. If you need a deterministic version, you should use a deterministic hash.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 #[serde(try_from = "String")]
 pub struct ThreadId {
     opaque_id: u32,
+}
+
+impl std::fmt::Debug for ThreadId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        // Inside the pretty printer: the thread's name.
+        if let Some(name) = crate::trace_print::names::thread_name(*self) {
+            return f.write_str(&name);
+        }
+        // Elsewhere: the same text as `derive(Debug)`.
+        f.debug_struct("ThreadId")
+            .field("opaque_id", &self.opaque_id)
+            .finish()
+    }
 }
 
 impl Serialize for ThreadId {
@@ -188,7 +202,7 @@ where
     T: Message + 'static,
 {
     switch();
-    let jh = spawn_without_switch(f, None, false, None, None);
+    let jh = spawn_without_switch(f, None, false, None, None, None);
     switch();
     jh
 }
@@ -200,7 +214,7 @@ where
     T: Message + 'static,
 {
     switch();
-    let jh = spawn_without_switch(f, None, true, None, None);
+    let jh = spawn_without_switch(f, None, true, None, None, None);
     switch();
     jh
 }
@@ -224,6 +238,7 @@ pub(crate) fn spawn_without_switch<F, T>(
     is_daemon: bool,
     stack_size: Option<usize>,
     sym_cid: Option<ThreadId>,
+    kind: Option<ThreadKind>,
 ) -> JoinHandle<T>
 where
     F: FnOnce() -> T,
@@ -261,10 +276,15 @@ where
         let tid = ExecutionState::with(|state| {
             let pos = state.next_pos();
             let tid = state.must.borrow().next_thread_id(&pos);
-            state
-                .must
-                .borrow_mut()
-                .handle_tcreate(tid, cid, sym_cid, pos, name.clone(), is_daemon);
+            state.must.borrow_mut().handle_tcreate(
+                tid,
+                cid,
+                sym_cid,
+                pos,
+                name.clone(),
+                is_daemon,
+                kind,
+            );
             tid
         });
         (cid, tid)
@@ -353,6 +373,7 @@ pub fn current_id() -> ThreadId {
 pub struct Builder {
     name: Option<String>,
     stack_size: Option<usize>,
+    kind: Option<ThreadKind>,
 }
 
 impl Builder {
@@ -361,7 +382,14 @@ impl Builder {
         Self {
             name: None,
             stack_size: None,
+            kind: None,
         }
+    }
+
+    /// Tells the pretty printer what this thread is, e.g. the thread behind an atomic.
+    pub(crate) fn kind(mut self, kind: ThreadKind) -> Self {
+        self.kind = Some(kind);
+        self
     }
 
     /// Names the thread-to-be. Currently the name is used for identification only in panic messages.
@@ -390,6 +418,7 @@ impl Builder {
             false,
             self.stack_size,
             None,
+            self.kind,
         ));
         switch();
         jh
@@ -410,6 +439,7 @@ impl Builder {
             true,
             self.stack_size,
             None,
+            self.kind,
         ));
         switch();
         jh
