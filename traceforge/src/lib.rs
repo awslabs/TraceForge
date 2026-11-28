@@ -636,6 +636,83 @@ impl ConfigBuilder {
 ///
 /// Verifies `f` under the options specified in `conf`.
 /// `f` acts as the main thread and may spawn other threads.
+///
+/// # `f` must be re-entrant
+///
+/// **`f` is executed from its entry point once per execution, and must behave the
+/// same way each time it is re-entered with the same recorded decisions.** The
+/// search explores by calling `f` again and replaying the prefix it has already
+/// recorded, so what replay restores are the *engine's* decisions: thread
+/// interleaving, the values of [`nondet`] and the named choices, and which send
+/// each receive reads from. Every one of those lives in the execution graph.
+///
+/// What replay cannot restore is memory `f` keeps for itself — a captured atomic,
+/// a `static mut`, a clock, `rand`, the contents of a file. Those lines are
+/// ordinary Rust and simply run again. So put **all** nondeterminism through
+/// [`nondet`] and its named variants, and carry **no** state across executions.
+///
+/// **Part of the shape is checked, and none of the data.** *Most* replayed-event
+/// handlers call `ExecutionGraph::validate_replay_event` — `handle_sample` is the
+/// exception: its replay branch returns the recorded value without validating, and
+/// an unexpected label there reaches a bare `panic!()`. Where the validator does
+/// run, a mismatch panics with
+/// *"Incorrect TraceForge Program. TraceForge programs must be deterministic. Any
+/// nondeterminism should be under the control of TraceForge via the nondet()
+/// function."* Measured, a divergence **is** detected in at least these: the kind
+/// of event at a position, a send's tag, a `nondet`'s range, and a spawned
+/// thread's name. A spawn at a position that recorded a different kind of event is
+/// caught earlier still, while the spawn's thread id is resolved
+/// (`tid_for_spawn`), with the same message.
+///
+/// What is **not** detected:
+///
+/// - a send's **value** is never compared. The comparison is written to skip a
+///   value that is pending, and `initialize_for_execution` sets *every* send value
+///   pending before replay begins — unconditionally, for every recorded send — so
+///   the guard cannot open.
+/// - a send's **destination** is not compared at all, and in `verify` it is not
+///   restored afterwards either, so the graph goes on describing a send to a
+///   recipient the program no longer uses. Changing whom a message is for is a
+///   change of topology rather than of payload, and it is silent.
+/// - a thread's **return value** is not compared, by the same dead guard as the
+///   send value: the trailing `End` result is cleared in the same place.
+/// - between two **`RecvMsg` labels**, no field is compared at all: the arm
+///   returns `Ok(())` without inspecting either one. So a divergence carried only
+///   in the receive label passes replay validation — measured, a different tag
+///   predicate, and a `recv_msg_block()` replaced by a `recv_msg()` at the same
+///   position, both pass unnoticed. This is a statement about the comparison, not
+///   about the whole receive path: a divergence that changes the Rust type the
+///   receive asks for still panics later, in `expect_msg`, with a different
+///   message.
+///
+/// **And the harm is not just a missed check.** What happens to the recorded prefix
+/// afterwards differs by field, so the two cases are worth separating:
+///
+/// - **a send's value is overwritten.** Once validation passes, the value from the
+///   label the re-entered program just produced is written into the graph. The
+///   engine then explores from a graph that no run of the program produced, and
+///   measured, **this can suppress a failure** — one that `verify` does report for
+///   the same program with its first-entry behaviour held stable. `verify` returns
+///   normally and reports nothing.
+/// - **a send's destination goes stale instead.** It is not compared *and* not
+///   restored, so the graph keeps describing a send to the recipient recorded on
+///   the first entry while the program sends elsewhere. We have measured the
+///   silence, not a consequence of this shape.
+///
+/// For the remaining silent classes we have measured that nothing is reported, and
+/// state nothing beyond that. Either way: do not rely on being told.
+///
+/// That is one witness rather than a theorem, and it is worth being exact about
+/// what it is evidence of: a program that breaks this precondition has no single
+/// state space for the engine to be complete *over*, so the comparison is against
+/// a re-entrant program, not a claim about valid ones. What it shows is that
+/// nothing tells you which of the two you ran.
+///
+/// `tests/replay_detection.rs` pins those representative cases in both directions
+/// — the detected ones against controls, the silent ones against the stateless
+/// reference — without claiming to cover every field `compare_for_replay` touches.
+/// `tests/replay_reentrancy.rs` shows the underlying cause: a counter the program
+/// captures reads `0` and then `1` across two executions.
 pub fn verify<F>(conf: Config, f: F) -> Stats
 where
     F: Fn() + Send + Sync + 'static,
